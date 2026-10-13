@@ -140,14 +140,8 @@ static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
 	mp1->buf = plm_buffer_create_with_filename(fn);
 	assertf(mp1->buf, "error opening file %s: %s\n", fn, strerror(errno));
 
-	// In the common case of accessing a movie stream
-	// from the ROM, disable buffering. This will allow
-	// the data to flow directly from the DMA into the buffers
-	// without any intervening memcpy. We keep buffering on
-	// for other supports like SD cards.
-	if (strncmp(fn, "rom:/", 5) == 0) {
-		setvbuf(mp1->buf->fh, NULL, _IONBF, 0);
-	}
+	// Disable buffering for every filesystem.
+	setvbuf(mp1->buf->fh, NULL, _IONBF, 0);
 
 	mp1->v = plm_video_create_with_buffer(mp1->buf, true);
 	assert(mp1->v);
