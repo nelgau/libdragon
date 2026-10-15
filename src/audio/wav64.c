@@ -195,7 +195,7 @@ static wav64_reader_t fdreader_make(int fd, int start, bool owned)
  *        come from". The wav64 takes ownership of the reader.
  */
 static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader,
-	const char *file_name, wav64_loadparms_t *parms)
+	const char *name, wav64_loadparms_t *parms)
 {
 	wav64_loadparms_t default_parms = {0};
 	if (!parms) parms = &default_parms;
@@ -207,13 +207,13 @@ static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader,
 
 	if (memcmp(head.id, WAV64_ID, 4) != 0) {
 		assertf(memcmp(head.id, WAV_RIFF_ID, 4) != 0 && memcmp(head.id, WAV_RIFX_ID, 4) != 0,
-			"wav64 %s: use audioconv64 to convert to wav64 format", file_name);
+			"wav64 %s: use audioconv64 to convert to wav64 format", name);
 		assertf(0, "wav64 %s: invalid ID: %02x%02x%02x%02x\n",
-			file_name, head.id[0], head.id[1], head.id[2], head.id[3]);
+			name, head.id[0], head.id[1], head.id[2], head.id[3]);
 	}
 	assertf(head.version == 10,
 		"wav64 %s: unsupported version %02x; reconvert with audioconv64)",
-		file_name, head.version);
+		name, head.version);
 	assertf(head.format < WAV64_NUM_FORMATS, "Unknown wav64 compression format %d; corrupted file?", head.format);
 	assertf(head.format < WAV64_NUM_FORMATS && algos[head.format].init != NULL,
         "wav64: compression level %d not initialized. Call wav64_init_compression(%d) at initialization time", head.format, head.format);
@@ -259,7 +259,7 @@ static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader,
 	if (!wav) heap_size += ROUND_UP(sizeof(wav64_t), 16);		// wav64_t (wave + st)
 
 	int heap_off_name = heap_size;
-	heap_size += ROUND_UP(strlen(file_name) + 1, 16);				// Filename
+	heap_size += ROUND_UP(strlen(name) + 1, 16);				// Name (for debugging)
 
 	int heap_off_samples = heap_size;
 	if (preload) heap_size += preload_size;							// Preloaded samples
@@ -282,7 +282,7 @@ static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader,
 	// Fill waveforms struct
 	memset(&wav->wave, 0, sizeof(waveform_t));
 	wav->wave.name = heap + heap_off_name;
-	strcpy(heap + heap_off_name, file_name);
+	strcpy(heap + heap_off_name, name);
 	wav->wave.channels = head.channels;
 	wav->wave.bits = head.nbits;
 	wav->wave.frequency = head.freq;
@@ -293,7 +293,7 @@ static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader,
 	int wloop_end = head.loop_end ? head.loop_end : head.len;
 	assertf(head.loop_len >= 0 && head.loop_len <= wloop_end &&
 		head.loop_end >= 0 && head.loop_end <= head.len,
-		"wav64 %s: invalid loop %d..%d (len %d)", file_name,
+		"wav64 %s: invalid loop %d..%d (len %d)", name,
 		wloop_end - (int)head.loop_len, wloop_end, (int)head.len);
 
 	// Read ext data
