@@ -61,11 +61,27 @@ static wav64_compression_t algos[WAV64_NUM_FORMATS] = {
 // Readers: where a WAV64's bytes come from. All codec I/O goes through
 // wav64_io_seek / wav64_io_read / wav64_io_dma_async, never the fd directly.
 //
-// Built-in strategies (ctx is the wav64_fdreader_t in the state):
+// Built-in strategies, made by fdreader_make():
 //   - file: lseek + read on a file descriptor
 //   - ROM:  the same, plus async PI DMA, for files in DragonFS
-// Applications can supply their own with wav64_load_reader().
+// Applications can supply their own with wav64_load_reader(). Like any
+// reader, the built-in ones own their state: close() frees it.
 // ---------------------------------------------------------------------------
+
+/**
+ * @brief State of a built-in reader (allocated by fdreader_make, freed by
+ *        fdreader_close).
+ *
+ * Offsets given to the reader are relative to the WAV64 data; @c start is
+ * where that data begins in the file (non-zero for #wav64_loadfd on a file
+ * descriptor that was already positioned).
+ */
+typedef struct {
+	int fd;                  ///< File descriptor
+	int start;               ///< File offset of the WAV64 data
+	pi_addr_t rom_base;      ///< PI address of file start (0 if not in ROM)
+	bool owned;              ///< The WAV64 opened the fd and must close it
+} wav64_fdreader_t;
 
 static int fdreader_seek(void *ctx, uint32_t offset) {
 	wav64_fdreader_t *f = ctx;
@@ -79,9 +95,9 @@ static int fdreader_read(void *ctx, void *dst, int len) {
 
 static void fdreader_close(void *ctx) {
 	wav64_fdreader_t *f = ctx;
-	if (f->owned && f->fd >= 0)
+	if (f->owned)
 		close(f->fd);
-	f->fd = -1;
+	free(f);
 }
 
 static uint64_t romreader_dma_async(void *ctx, uint32_t offset, void *dst, int len) {
@@ -158,9 +174,11 @@ static int wav64_none_get_bitrate(wav64_t *wav) {
 }
 
 /** @brief Build a built-in reader over fd: ROM when the file is in DragonFS
- *  (async DMA available), plain file otherwise. State goes in *fdr. */
-static wav64_reader_t fdreader_make(wav64_fdreader_t *fdr, int fd, int start, bool owned)
+ *  (async DMA available), plain file otherwise. */
+static wav64_reader_t fdreader_make(int fd, int start, bool owned)
 {
+	wav64_fdreader_t *fdr = malloc(sizeof(wav64_fdreader_t));
+	assertf(fdr, "Out of memory");
 	*fdr = (wav64_fdreader_t){ .fd = fd, .start = start, .owned = owned };
 	ioctl(fd, IODFS_GET_ROM_BASE, &fdr->rom_base);
 	return (wav64_reader_t){
@@ -174,13 +192,9 @@ static wav64_reader_t fdreader_make(wav64_fdreader_t *fdr, int fd, int start, bo
 
 /**
  * @brief Load a WAV64 from a reader: everything after "where do the bytes
- *        come from".
- *
- * @param fdr   For the built-in readers: their state, which reader.ctx points
- *              to. It is adopted into the wav64 state (the caller's copy only
- *              needs to live until this returns). NULL for application readers.
+ *        come from". The wav64 takes ownership of the reader.
  */
-static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader, const wav64_fdreader_t *fdr,
+static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader,
 	const char *file_name, wav64_loadparms_t *parms)
 {
 	wav64_loadparms_t default_parms = {0};
@@ -286,13 +300,9 @@ static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader, const wav64_f
 	reader.read(reader.ctx, wav->st->ext, ext_size);
 	data_cache_hit_writeback(wav->st->ext, ext_size);
 
-	// Finish initialization of wav64 state. The built-in readers keep their
-	// state inside wav64_state_t from now on.
+	// Finish initialization of wav64 state
 	wav->st->format = head.format;
 	wav->st->reader = reader;
-	wav->st->fdr = fdr ? *fdr : (wav64_fdreader_t){ .fd = -1 };
-	if (fdr)
-		wav->st->reader.ctx = &wav->st->fdr;
 	wav->st->base_offset = head.start_offset;
 	wav->st->flags = (preload ? WAV64_FLAG_PRELOAD : 0);
 
@@ -338,9 +348,6 @@ static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader, const wav64_f
 
 			wav->st = realloc(wav->st, heap_off_preload_end);
 			wav->st->ext = NULL;
-			// The built-in readers point into the state, which may have moved.
-			if (fdr)
-				wav->st->reader.ctx = &wav->st->fdr;
 
 			// Reinitialize as RAW format after preloading
 			wav->st->format = WAV64_FORMAT_RAW;
@@ -368,9 +375,8 @@ static wav64_t* open_by_name(wav64_t *wav, const char *file_name, wav64_loadparm
 		file_name = dfs_name;
 	}
 
-	wav64_fdreader_t fdr;
-	wav64_reader_t reader = fdreader_make(&fdr, must_open(file_name), 0, true);
-	return internal_open(wav, reader, &fdr, file_name, parms);
+	wav64_reader_t reader = fdreader_make(must_open(file_name), 0, true);
+	return internal_open(wav, reader, file_name, parms);
 }
 
 void wav64_open(wav64_t *wav, const char *file_name)
@@ -386,16 +392,15 @@ wav64_t* wav64_load(const char *file_name, wav64_loadparms_t *parms)
 wav64_t* wav64_loadfd(int fd, const char *debug_file_name, wav64_loadparms_t *parms)
 {
 	// The WAV64 data starts wherever fd is positioned now.
-	wav64_fdreader_t fdr;
-	wav64_reader_t reader = fdreader_make(&fdr, fd, lseek(fd, 0, SEEK_CUR), false);
-	return internal_open(NULL, reader, &fdr, debug_file_name, parms);
+	wav64_reader_t reader = fdreader_make(fd, lseek(fd, 0, SEEK_CUR), false);
+	return internal_open(NULL, reader, debug_file_name, parms);
 }
 
 wav64_t* wav64_load_reader(const wav64_reader_t *reader, const char *debug_name, wav64_loadparms_t *parms)
 {
 	if (!debug_name) debug_name = "(reader)";
 	assertf(reader && reader->seek && reader->read, "wav64 %s: reader needs seek and read", debug_name);
-	return internal_open(NULL, *reader, NULL, debug_name, parms);
+	return internal_open(NULL, *reader, debug_name, parms);
 }
 
 void wav64_play(wav64_t *wav, int ch)

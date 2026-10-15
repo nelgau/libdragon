@@ -45,20 +45,6 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(wav64_header_t) == 32, "invalid wav64_header size");
 
 #ifdef N64
-/**
- * @brief State of the built-in file readers (plain file, and file in ROM).
- *
- * Offsets given to the reader are relative to the WAV64 data; @c start is
- * where that data begins in the file (non-zero for #wav64_loadfd on a file
- * descriptor that was already positioned).
- */
-typedef struct {
-	int fd;                  ///< File descriptor (-1 once closed)
-	int start;               ///< File offset of the WAV64 data
-	pi_addr_t rom_base;      ///< PI address of file start (0 if not in ROM)
-	bool owned;              ///< The WAV64 opened the fd and must close it
-} wav64_fdreader_t;
-
 /** @brief WAV64 state */
 typedef struct wav64_state_s {
 	int format;			     ///< Internal format of the file
@@ -67,8 +53,6 @@ typedef struct wav64_state_s {
 	/** Where bytes come from. All codec I/O goes through #wav64_io_seek,
 	 *  #wav64_io_read and #wav64_io_dma_async. */
 	wav64_reader_t reader;
-	/** Storage for the built-in file/ROM readers (reader.ctx points here). */
-	wav64_fdreader_t fdr;
 	int base_offset;		 ///< Start of the samples (offset from the start of the WAV64 data)
 	uint8_t flags;           ///< Misc flags
 	/**
