@@ -186,9 +186,9 @@ static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader, const wav64_f
 	wav64_loadparms_t default_parms = {0};
 	if (!parms) parms = &default_parms;
 
-	// Read the header. Every reader starts at offset 0, the beginning of the
-	// WAV64 data (for the built-in ones, where the fd is positioned).
+	// Read the header, at offset 0 (the beginning of the WAV64 data).
 	wav64_header_t head;
+	reader.seek(reader.ctx, 0);
 	reader.read(reader.ctx, &head, sizeof(head));
 
 	if (memcmp(head.id, WAV64_ID, 4) != 0) {
