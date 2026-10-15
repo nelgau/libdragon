@@ -152,7 +152,8 @@ wav64_t *wav64_load(const char *fn, wav64_loadparms_t *parms);
  *
  * The interface mirrors lseek + read: the codecs seek to an offset, then read
  * forward from there. Offsets are relative to the start of the WAV64 data (the
- * "WV64" header is at offset 0).
+ * "WV64" header is at offset 0), and the read position must start at 0: the
+ * header is read first, without a seek.
  *
  * The WAV64 copies this structure. It calls #close (if set) when it no longer
  * needs the reader: at #wav64_close, or right after loading when the file is

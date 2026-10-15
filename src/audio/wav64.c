@@ -157,52 +157,37 @@ static int wav64_none_get_bitrate(wav64_t *wav) {
 	return wav->wave.frequency * wav->wave.channels * wav->wave.bits;
 }
 
-static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_name,
-	const wav64_reader_t *user_reader, wav64_loadparms_t *parms)
+/** @brief Build a built-in reader over fd: ROM when the file is in DragonFS
+ *  (async DMA available), plain file otherwise. State goes in *fdr. */
+static wav64_reader_t fdreader_make(wav64_fdreader_t *fdr, int fd, int start, bool owned)
+{
+	*fdr = (wav64_fdreader_t){ .fd = fd, .start = start, .owned = owned };
+	ioctl(fd, IODFS_GET_ROM_BASE, &fdr->rom_base);
+	return (wav64_reader_t){
+		.ctx = fdr,
+		.seek = fdreader_seek,
+		.read = fdreader_read,
+		.close = fdreader_close,
+		.dma_async = fdr->rom_base ? romreader_dma_async : NULL,
+	};
+}
+
+/**
+ * @brief Load a WAV64 from a reader: everything after "where do the bytes
+ *        come from".
+ *
+ * @param fdr   For the built-in readers: their state, which reader.ctx points
+ *              to. It is adopted into the wav64 state (the caller's copy only
+ *              needs to live until this returns). NULL for application readers.
+ */
+static wav64_t* internal_open(wav64_t *wav, wav64_reader_t reader, const wav64_fdreader_t *fdr,
+	const char *file_name, wav64_loadparms_t *parms)
 {
 	wav64_loadparms_t default_parms = {0};
 	if (!parms) parms = &default_parms;
 
-	// Pick the reader: the application's, or a built-in one over a file
-	// descriptor (ROM when the file is in DragonFS, plain file otherwise).
-	wav64_fdreader_t fdr = { .fd = -1 };
-	wav64_reader_t reader;
-	if (user_reader) {
-		assertf(user_reader->seek && user_reader->read, "wav64 %s: reader needs seek and read", file_name);
-		reader = *user_reader;
-	} else {
-		int start_offset = 0;
-		bool owned_fd = false;
-		if (file_handle < 0) {
-			// For backwards compatibility with old versions of this file, we support
-			// an unprefixed file name as a dfs file. This is deprecated and not documented
-			// but we just want to avoid breaking existing code
-			if (file_name && strchr(file_name, ':') == NULL) {
-				char* dfs_name = alloca(5 + strlen(file_name) + 1);
-				strcpy(dfs_name, "rom:/");
-				strcat(dfs_name, file_name);
-				file_name = dfs_name;
-			}
-
-			file_handle = must_open(file_name);
-			owned_fd = true;
-		} else {
-			start_offset = lseek(file_handle, 0, SEEK_CUR);
-		}
-
-		fdr = (wav64_fdreader_t){ .fd = file_handle, .start = start_offset, .owned = owned_fd };
-		ioctl(file_handle, IODFS_GET_ROM_BASE, &fdr.rom_base);
-		reader = (wav64_reader_t){
-			.ctx = &fdr,
-			.seek = fdreader_seek,
-			.read = fdreader_read,
-			.close = fdreader_close,
-			.dma_async = fdr.rom_base ? romreader_dma_async : NULL,
-		};
-	}
-
-	// Read the header. The read position starts at the beginning of the WAV64
-	// data (offset 0), exactly where a freshly opened (or passed-in) fd is.
+	// Read the header. Every reader starts at offset 0, the beginning of the
+	// WAV64 data (for the built-in ones, where the fd is positioned).
 	wav64_header_t head;
 	reader.read(reader.ctx, &head, sizeof(head));
 
@@ -304,9 +289,9 @@ static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_na
 	// Finish initialization of wav64 state. The built-in readers keep their
 	// state inside wav64_state_t from now on.
 	wav->st->format = head.format;
-	wav->st->fdr = fdr;
 	wav->st->reader = reader;
-	if (!user_reader)
+	wav->st->fdr = fdr ? *fdr : (wav64_fdreader_t){ .fd = -1 };
+	if (fdr)
 		wav->st->reader.ctx = &wav->st->fdr;
 	wav->st->base_offset = head.start_offset;
 	wav->st->flags = (preload ? WAV64_FLAG_PRELOAD : 0);
@@ -354,7 +339,7 @@ static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_na
 			wav->st = realloc(wav->st, heap_off_preload_end);
 			wav->st->ext = NULL;
 			// The built-in readers point into the state, which may have moved.
-			if (!user_reader)
+			if (fdr)
 				wav->st->reader.ctx = &wav->st->fdr;
 
 			// Reinitialize as RAW format after preloading
@@ -370,25 +355,47 @@ static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_na
 }
 
 
+/** @brief Front door for filenames: open the file, then load through a built-in reader. */
+static wav64_t* open_by_name(wav64_t *wav, const char *file_name, wav64_loadparms_t *parms)
+{
+	// For backwards compatibility with old versions of this file, we support
+	// an unprefixed file name as a dfs file. This is deprecated and not documented
+	// but we just want to avoid breaking existing code
+	if (file_name && strchr(file_name, ':') == NULL) {
+		char* dfs_name = alloca(5 + strlen(file_name) + 1);
+		strcpy(dfs_name, "rom:/");
+		strcat(dfs_name, file_name);
+		file_name = dfs_name;
+	}
+
+	wav64_fdreader_t fdr;
+	wav64_reader_t reader = fdreader_make(&fdr, must_open(file_name), 0, true);
+	return internal_open(wav, reader, &fdr, file_name, parms);
+}
+
 void wav64_open(wav64_t *wav, const char *file_name)
 {
-	internal_open(wav, -1, file_name, NULL, NULL);
+	open_by_name(wav, file_name, NULL);
 }
 
 wav64_t* wav64_load(const char *file_name, wav64_loadparms_t *parms)
 {
-	return internal_open(NULL, -1, file_name, NULL, parms);
+	return open_by_name(NULL, file_name, parms);
 }
 
 wav64_t* wav64_loadfd(int fd, const char *debug_file_name, wav64_loadparms_t *parms)
 {
-	return internal_open(NULL, fd, debug_file_name, NULL, parms);
+	// The WAV64 data starts wherever fd is positioned now.
+	wav64_fdreader_t fdr;
+	wav64_reader_t reader = fdreader_make(&fdr, fd, lseek(fd, 0, SEEK_CUR), false);
+	return internal_open(NULL, reader, &fdr, debug_file_name, parms);
 }
 
 wav64_t* wav64_load_reader(const wav64_reader_t *reader, const char *debug_name, wav64_loadparms_t *parms)
 {
-	assertf(reader, "wav64_load_reader: reader is NULL");
-	return internal_open(NULL, -1, debug_name ? debug_name : "(reader)", reader, parms);
+	if (!debug_name) debug_name = "(reader)";
+	assertf(reader && reader->seek && reader->read, "wav64 %s: reader needs seek and read", debug_name);
+	return internal_open(NULL, *reader, NULL, debug_name, parms);
 }
 
 void wav64_play(wav64_t *wav, int ch)
