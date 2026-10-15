@@ -141,6 +141,58 @@ typedef struct wav64_loadparms_s {
 LIBDRAGON_PREVIEW_API
 wav64_t *wav64_load(const char *fn, wav64_loadparms_t *parms);
 
+/**
+ * @brief Where a WAV64 reads its bytes from.
+ * @preview
+ *
+ * By default a WAV64 reads its file through the filesystem (#wav64_load), or
+ * straight from ROM with asynchronous PI DMA when the file is in DragonFS.
+ * A reader lets the application supply the bytes itself instead, for example
+ * from its own cache or streaming system. Pass one to #wav64_load_reader.
+ *
+ * The interface mirrors lseek + read: the codecs seek to an offset, then read
+ * forward from there. Offsets are relative to the start of the WAV64 data (the
+ * "WV64" header is at offset 0).
+ *
+ * The WAV64 copies this structure. It calls #close (if set) when it no longer
+ * needs the reader: at #wav64_close, or right after loading when the file is
+ * fully preloaded.
+ */
+typedef struct wav64_reader_s {
+	/** @brief Opaque pointer passed to every callback. */
+	void *ctx;
+	/** @brief Move the read position to offset. Returns 0 on success. */
+	int (*seek)(void *ctx, uint32_t offset);
+	/** @brief Read len bytes at the read position into dst and advance.
+	 *         Returns the number of bytes read. May block. */
+	int (*read)(void *ctx, void *dst, int len);
+	/** @brief Optional: release whatever ctx holds. */
+	void (*close)(void *ctx);
+	/**
+	 * @brief Optional: start an asynchronous PI DMA of len bytes at offset.
+	 *
+	 * Returns the DMA ticket (see #dma_read_async), or 0 if the transfer
+	 * can't be done this way (for example, mismatched address parity); the
+	 * caller then falls back to #seek and #read. Readers that set this let
+	 * the mixer request samples early, overlapping the DMA with mixing.
+	 */
+	uint64_t (*dma_async)(void *ctx, uint32_t offset, void *dst, int len);
+} wav64_reader_t;
+
+/**
+ * @brief Load a WAV64 whose bytes come from an application-supplied reader.
+ * @preview
+ *
+ * Same as #wav64_load, except that every byte (header included) is read
+ * through @p reader instead of a file.
+ *
+ * @param   reader      How to read the WAV64's bytes (copied).
+ * @param   debug_name  Name used in error messages and #waveform_t::name.
+ * @param   parms       Optional loading parameters (or NULL for defaults).
+ */
+LIBDRAGON_PREVIEW_API
+wav64_t *wav64_load_reader(const wav64_reader_t *reader, const char *debug_name, wav64_loadparms_t *parms);
+
 /** @brief Configure a WAV64 file for looping playback. */
 void wav64_set_loop(wav64_t *wav, bool loop);
 

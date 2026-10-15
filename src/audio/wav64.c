@@ -57,21 +57,72 @@ static wav64_compression_t algos[WAV64_NUM_FORMATS] = {
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Readers: where a WAV64's bytes come from. All codec I/O goes through
+// wav64_io_seek / wav64_io_read / wav64_io_dma_async, never the fd directly.
+//
+// Built-in strategies (ctx is the wav64_fdreader_t in the state):
+//   - file: lseek + read on a file descriptor
+//   - ROM:  the same, plus async PI DMA, for files in DragonFS
+// Applications can supply their own with wav64_load_reader().
+// ---------------------------------------------------------------------------
+
+static int fdreader_seek(void *ctx, uint32_t offset) {
+	wav64_fdreader_t *f = ctx;
+	return lseek(f->fd, f->start + offset, SEEK_SET) < 0 ? -1 : 0;
+}
+
+static int fdreader_read(void *ctx, void *dst, int len) {
+	wav64_fdreader_t *f = ctx;
+	return read(f->fd, dst, len);
+}
+
+static void fdreader_close(void *ctx) {
+	wav64_fdreader_t *f = ctx;
+	if (f->owned && f->fd >= 0)
+		close(f->fd);
+	f->fd = -1;
+}
+
+static uint64_t romreader_dma_async(void *ctx, uint32_t offset, void *dst, int len) {
+	wav64_fdreader_t *f = ctx;
+	uint32_t pi_addr = f->rom_base + f->start + offset;
+	// PI DMA needs RAM and PI addresses with the same 1-bit misalignment.
+	if (((uint32_t)dst ^ pi_addr) & 1)
+		return 0;
+	return dma_read_async(dst, pi_addr, len);
+}
+
+uint64_t wav64_io_dma_async(wav64_t *wav, samplebuffer_t *sbuf, uint32_t offset, void *dst, int len) {
+	if (!wav64_io_can_dma(wav))
+		return 0;
+	// A prior chunk for this sample buffer may still be in flight; wait before
+	// replacing its ticket (or before the caller writes the buffer itself).
+	samplebuffer_dma_wait(sbuf);
+	uint64_t ticket = wav->st->reader.dma_async(wav->st->reader.ctx, offset, dst, len);
+	if (ticket)
+		sbuf->dma_ticket = ticket;
+	return ticket;
+}
+
+/** @brief Release the reader (if any) and forget it: no more I/O after this. */
+static void wav64_io_close(wav64_t *wav) {
+	if (wav->st->reader.close)
+		wav->st->reader.close(wav->st->reader.ctx);
+	memset(&wav->st->reader, 0, sizeof(wav->st->reader));
+}
+
 static void raw_waveform_read(samplebuffer_t *sbuf, wav64_t *wav, int wpos, int wlen, int bps) {
-	uint32_t rom = wav->st->rom_base;
 	while (wlen > 0) {
 		int n = MIN(wlen, SAMPLEBUFFER_MARGIN_UNITS);
 		uint8_t* ram_addr = (uint8_t*)samplebuffer_append(sbuf, n);
 		int bytes = n << bps;
-		uint32_t pi_addr = rom + wav->st->base_offset + (wpos << bps);
+		uint32_t offset = wav->st->base_offset + (wpos << bps);
 
-		if (rom && !(((uint32_t)ram_addr ^ pi_addr) & 1)) {
-			samplebuffer_dma_wait(sbuf);
-			sbuf->dma_ticket = dma_read_async(ram_addr, pi_addr, bytes);
-		} else {
-			lseek(wav->st->current_fd, wav->st->base_offset + (wpos << bps), SEEK_SET);
+		if (!wav64_io_dma_async(wav, sbuf, offset, ram_addr, bytes)) {
+			wav64_io_seek(wav, offset);
 			// FIXME: remove CachedAddr() when read() supports uncached addresses
-			read(wav->st->current_fd, CachedAddr(ram_addr), bytes);
+			wav64_io_read(wav, CachedAddr(ram_addr), bytes);
 		}
 		wlen -= n;
 		wpos += n;
@@ -92,7 +143,7 @@ static void wav64_none_init(wav64_t *wav, int state_size) {
 		wav->wave.read = wav64_none_read;
 		// Samples come straight from ROM via async PI DMA; a file on any other
 		// medium is read synchronously instead.
-		wav->wave.async_read = wav->st->rom_base != 0;
+		wav->wave.async_read = wav64_io_can_dma(wav);
 	} else {
 		wav->wave.read = NULL;
 		wav->wave.async_read = false;
@@ -106,33 +157,54 @@ static int wav64_none_get_bitrate(wav64_t *wav) {
 	return wav->wave.frequency * wav->wave.channels * wav->wave.bits;
 }
 
-static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_name, wav64_loadparms_t *parms)
+static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_name,
+	const wav64_reader_t *user_reader, wav64_loadparms_t *parms)
 {
 	wav64_loadparms_t default_parms = {0};
 	if (!parms) parms = &default_parms;
 
-	// Open the input file, and read the header
-	int start_offset = 0;
-	bool owned_fd = false;
-	if (file_handle < 0) {
-		// For backwards compatibility with old versions of this file, we support
-		// an unprefixed file name as a dfs file. This is deprecated and not documented
-		// but we just want to avoid breaking existing code
-		if (file_name && strchr(file_name, ':') == NULL) {
-			char* dfs_name = alloca(5 + strlen(file_name) + 1);
-			strcpy(dfs_name, "rom:/");
-			strcat(dfs_name, file_name);
-			file_name = dfs_name;
+	// Pick the reader: the application's, or a built-in one over a file
+	// descriptor (ROM when the file is in DragonFS, plain file otherwise).
+	wav64_fdreader_t fdr = { .fd = -1 };
+	wav64_reader_t reader;
+	if (user_reader) {
+		assertf(user_reader->seek && user_reader->read, "wav64 %s: reader needs seek and read", file_name);
+		reader = *user_reader;
+	} else {
+		int start_offset = 0;
+		bool owned_fd = false;
+		if (file_handle < 0) {
+			// For backwards compatibility with old versions of this file, we support
+			// an unprefixed file name as a dfs file. This is deprecated and not documented
+			// but we just want to avoid breaking existing code
+			if (file_name && strchr(file_name, ':') == NULL) {
+				char* dfs_name = alloca(5 + strlen(file_name) + 1);
+				strcpy(dfs_name, "rom:/");
+				strcat(dfs_name, file_name);
+				file_name = dfs_name;
+			}
+
+			file_handle = must_open(file_name);
+			owned_fd = true;
+		} else {
+			start_offset = lseek(file_handle, 0, SEEK_CUR);
 		}
 
-		file_handle = must_open(file_name);
-		owned_fd = true;
-	} else {
-		start_offset = lseek(file_handle, 0, SEEK_CUR);
+		fdr = (wav64_fdreader_t){ .fd = file_handle, .start = start_offset, .owned = owned_fd };
+		ioctl(file_handle, IODFS_GET_ROM_BASE, &fdr.rom_base);
+		reader = (wav64_reader_t){
+			.ctx = &fdr,
+			.seek = fdreader_seek,
+			.read = fdreader_read,
+			.close = fdreader_close,
+			.dma_async = fdr.rom_base ? romreader_dma_async : NULL,
+		};
 	}
 
+	// Read the header. The read position starts at the beginning of the WAV64
+	// data (offset 0), exactly where a freshly opened (or passed-in) fd is.
 	wav64_header_t head;
-	read(file_handle, &head, sizeof(head));
+	reader.read(reader.ctx, &head, sizeof(head));
 
 	if (memcmp(head.id, WAV64_ID, 4) != 0) {
 		assertf(memcmp(head.id, WAV_RIFF_ID, 4) != 0 && memcmp(head.id, WAV_RIFX_ID, 4) != 0,
@@ -157,8 +229,8 @@ static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_na
 	int vframe_bytes = 0;
 	if (head.format == WAV64_FORMAT_VADPCM) {
 		uint8_t prefix[offsetof(wav64_header_vadpcm_t, huff_tbl)];
-		read(file_handle, prefix, sizeof(prefix));
-		lseek(file_handle, -(int)sizeof(prefix), SEEK_CUR);
+		reader.read(reader.ctx, prefix, sizeof(prefix));
+		reader.seek(reader.ctx, sizeof(wav64_header_t));
 		int bits = prefix[offsetof(wav64_header_vadpcm_t, residual_bits)];
 		vframe_bytes = VADPCM_FRAME_BYTES(VADPCM_RESIDUAL_BITS(bits));
 		uint16_t vflags;
@@ -226,17 +298,18 @@ static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_na
 		wloop_end - (int)head.loop_len, wloop_end, (int)head.len);
 
 	// Read ext data
-	read(file_handle, wav->st->ext, ext_size);
+	reader.read(reader.ctx, wav->st->ext, ext_size);
 	data_cache_hit_writeback(wav->st->ext, ext_size);
 
-	// Finish initialization of wav64 state
+	// Finish initialization of wav64 state. The built-in readers keep their
+	// state inside wav64_state_t from now on.
 	wav->st->format = head.format;
-	wav->st->current_fd = file_handle;
-	wav->st->base_offset = head.start_offset + start_offset;
-	wav->st->flags = (owned_fd ? WAV64_FLAG_OWNED_FD : 0) |
-	                 (preload  ? WAV64_FLAG_PRELOAD  : 0);
-	wav->st->rom_base = 0;
-	ioctl(file_handle, IODFS_GET_ROM_BASE, &wav->st->rom_base);
+	wav->st->fdr = fdr;
+	wav->st->reader = reader;
+	if (!user_reader)
+		wav->st->reader.ctx = &wav->st->fdr;
+	wav->st->base_offset = head.start_offset;
+	wav->st->flags = (preload ? WAV64_FLAG_PRELOAD : 0);
 
 	// Initialize the compression algorithm
 	algos[wav->st->format].init(wav, head.state_size);
@@ -280,17 +353,17 @@ static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_na
 
 			wav->st = realloc(wav->st, heap_off_preload_end);
 			wav->st->ext = NULL;
+			// The built-in readers point into the state, which may have moved.
+			if (!user_reader)
+				wav->st->reader.ctx = &wav->st->fdr;
 
 			// Reinitialize as RAW format after preloading
 			wav->st->format = WAV64_FORMAT_RAW;
 			algos[wav->st->format].init(wav, head.state_size);
 		}
 
-		if (wav->st->current_fd >= 0 && (wav->st->flags & WAV64_FLAG_OWNED_FD)) {
-			close(wav->st->current_fd);
-			wav->st->current_fd = -1;
-			wav->st->flags &= ~WAV64_FLAG_OWNED_FD;
-		}
+		// Fully preloaded: the bytes are all in RDRAM, the reader isn't needed.
+		wav64_io_close(wav);
 	}
 
 	return wav;
@@ -299,17 +372,23 @@ static wav64_t* internal_open(wav64_t *wav, int file_handle, const char *file_na
 
 void wav64_open(wav64_t *wav, const char *file_name)
 {
-	internal_open(wav, -1, file_name, NULL);
+	internal_open(wav, -1, file_name, NULL, NULL);
 }
 
 wav64_t* wav64_load(const char *file_name, wav64_loadparms_t *parms)
 {
-	return internal_open(NULL, -1, file_name, parms);
+	return internal_open(NULL, -1, file_name, NULL, parms);
 }
 
 wav64_t* wav64_loadfd(int fd, const char *debug_file_name, wav64_loadparms_t *parms)
 {
-	return internal_open(NULL, fd, debug_file_name, parms);
+	return internal_open(NULL, fd, debug_file_name, NULL, parms);
+}
+
+wav64_t* wav64_load_reader(const wav64_reader_t *reader, const char *debug_name, wav64_loadparms_t *parms)
+{
+	assertf(reader, "wav64_load_reader: reader is NULL");
+	return internal_open(NULL, -1, debug_name ? debug_name : "(reader)", reader, parms);
 }
 
 void wav64_play(wav64_t *wav, int ch)
@@ -377,10 +456,7 @@ void wav64_close(wav64_t *wav)
 	if (algos[wav->st->format].close)
 		algos[wav->st->format].close(wav);
 
-	if (wav->st->current_fd >= 0 && (wav->st->flags & WAV64_FLAG_OWNED_FD)) {
-		close(wav->st->current_fd);
-		wav->st->current_fd = -1;
-	}
+	wav64_io_close(wav);
 
 	memset(wav, 0, sizeof(wav64_t));
 

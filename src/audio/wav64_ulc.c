@@ -488,12 +488,12 @@ static void waveform_ulc_start(void *ctx, samplebuffer_t *sbuf) {
 }
 
 static void waveform_ulc_load_block(wav64_t *wav, const wav64_header_ulc_t *ext, const ulc_state_t *state, uint8_t *input) {
-    lseek(wav->st->current_fd, wav->st->base_offset + state->stream_offset, SEEK_SET);
+    wav64_io_seek(wav, wav->st->base_offset + state->stream_offset);
 
     // read() can DMA directly into this cached stack buffer. Invalidate it
     // first so the CPU decoder does not consume stale cache lines.
     data_cache_hit_writeback_invalidate(input, ext->max_block_size);
-    int size = read(wav->st->current_fd, input, ext->max_block_size);
+    int size = wav64_io_read(wav, input, ext->max_block_size);
     assertf(size > 0, "wav64: %s: ULC read past end", wav->wave.name);
 }
 
@@ -525,9 +525,9 @@ static void waveform_ulc_read(void *ctx, samplebuffer_t *sbuf, int wpos, int wle
             uint32_t anchor_index = anchor_block / ULC_SEEK_INTERVAL_BLOCKS;
 
             // Read the block offset from the sparse seek table at the end of the file
-            lseek(wav->st->current_fd, wav->st->base_offset + ext->seek_table_offset + anchor_index * sizeof(uint32_t), SEEK_SET);
+            wav64_io_seek(wav, wav->st->base_offset + ext->seek_table_offset + anchor_index * sizeof(uint32_t));
             uint32_t anchor_offset;
-            int size = read(wav->st->current_fd, &anchor_offset, sizeof(anchor_offset));
+            int size = wav64_io_read(wav, &anchor_offset, sizeof(anchor_offset));
             assertf(size == sizeof(anchor_offset), "wav64: %s: cannot read ULC seek table", wav->wave.name);
 
             state->stream_offset = anchor_offset;

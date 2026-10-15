@@ -70,10 +70,10 @@ static void huffv_decompress(wav64_t *wav, wav64_state_vadpcm_t *vstate, uint8_t
 
     unsigned int bitpos = vstate->bitpos;
     // debugf("huffv_decompress: bitpos 0x%x.%d, seek to 0x%x\n", bitpos/8, bitpos&7, wav->st->base_offset +bitpos / 8);
-    lseek(wav->st->current_fd, wav->st->base_offset + bitpos / 8, SEEK_SET);
+    wav64_io_seek(wav, wav->st->base_offset + bitpos / 8);
 
     // Read the compressed data
-    read(wav->st->current_fd, CachedAddr(scratch), slen);
+    wav64_io_read(wav, CachedAddr(scratch), slen);
     uint8_t *src = CachedAddr(scratch);
 
     // Decompress the data
@@ -256,21 +256,18 @@ static void waveform_vadpcm_read_compressed(void *ctx, samplebuffer_t *sbuf, int
 					fidx = vadpcm_file_index(wpos + ncache, c, nframes_total, channels);
 					nbytes = (n - ncache) * fbytes;
 				}
-				pi_addr_t pi_addr = wav->st->rom_base + wav->st->base_offset + fidx * fbytes;
-				if (wav->st->rom_base && !(((uint32_t)dest ^ pi_addr) & 1)) {
-					// A prior chunk of this same WaveformRead may still be in
-					// flight; wait before replacing the ticket.
-					samplebuffer_dma_wait(dstbuf);
-					dstbuf->dma_ticket = dma_read_async(dest, pi_addr, nbytes);
-				} else {
+				uint32_t offset = wav->st->base_offset + fidx * fbytes;
+				// From ROM: async DMA (wav64_io_dma_async waits for a prior
+				// chunk of this same WaveformRead before replacing the ticket).
+				if (!wav64_io_dma_async(wav, dstbuf, offset, dest, nbytes)) {
 					// This fills the ring through the cache, and a cached write
 					// carries whole lines: the bytes it shares with the chunk
 					// before it are read now and written back later, so a DMA
 					// still filling them would be undone. Frames are 9 bytes,
 					// so that neighbour is almost always there.
 					samplebuffer_dma_wait(dstbuf);
-					lseek(wav->st->current_fd, wav->st->base_offset + fidx * fbytes, SEEK_SET);
-					int read_bytes = read(wav->st->current_fd, CachedAddr(dest), nbytes);
+					wav64_io_seek(wav, offset);
+					int read_bytes = wav64_io_read(wav, CachedAddr(dest), nbytes);
 					assertf(nbytes == read_bytes, "invalid read past end: %d vs %d", nbytes, read_bytes);
 					data_cache_hit_writeback_invalidate(CachedAddr(dest), nbytes);
 				}
@@ -336,7 +333,7 @@ void wav64_vadpcm_preload(wav64_t *wav, void *dst)
 	uint8_t *scratch = malloc(ROUND_UP(file_bytes, 16));
 	assertf(scratch, "Out of memory");
 
-	lseek(wav->st->current_fd, wav->st->base_offset, SEEK_SET);
+	wav64_io_seek(wav, wav->st->base_offset);
 	if (vhead->flags & VADPCM_FLAG_HUFFMAN) {
 		wav64_state_vadpcm_t st = {0};
 		int scratch2_size = ROUND_UP(file_bytes * 2, 16);
@@ -345,7 +342,7 @@ void wav64_vadpcm_preload(wav64_t *wav, void *dst)
 		huffv_decompress(wav, &st, scratch, file_bytes, scratch2, scratch2_size);
 		free(scratch2);
 	} else {
-		int n = read(wav->st->current_fd, scratch, file_bytes);
+		int n = wav64_io_read(wav, scratch, file_bytes);
 		assertf(n == file_bytes, "wav64: short VADPCM preload read");
 	}
 
@@ -435,7 +432,7 @@ void wav64_vadpcm_init(wav64_t *wav, int state_size)
     // Plain frames stream from ROM with async PI DMA. Huffman frames must be
     // decompressed by the CPU, and any other medium is read synchronously.
     // A full preload also leaves nothing to overlap: the body lives in RDRAM.
-    wav->wave.async_read = wav->st->rom_base != 0 &&
+    wav->wave.async_read = wav64_io_can_dma(wav) &&
         !(vhead->flags & VADPCM_FLAG_HUFFMAN) &&
         !(wav->st->flags & WAV64_FLAG_PRELOAD);
 
@@ -449,9 +446,16 @@ void wav64_vadpcm_init(wav64_t *wav, int state_size)
 		int nbytes = ROUND_UP(n * fbytes, 16);
 		void *buf = malloc_uncached(nbytes);
 		assertf(buf, "wav64: %s: attack cache alloc failed (%d frames)", wav->wave.name, n);
-		uint32_t pi = wav->st->rom_base + wav->st->base_offset;
+		uint32_t offset = wav->st->base_offset;
 		data_cache_hit_writeback_invalidate(CachedAddr(buf), nbytes);
-		dma_read(CachedAddr(buf), pi, nbytes);
+		uint64_t ticket = wav->st->reader.dma_async(wav->st->reader.ctx, offset, CachedAddr(buf), nbytes);
+		if (ticket) {
+			dma_wait_finished(ticket);
+		} else {
+			wav64_io_seek(wav, offset);
+			wav64_io_read(wav, CachedAddr(buf), nbytes);
+			data_cache_hit_writeback_invalidate(CachedAddr(buf), nbytes);
+		}
 		wav->st->attack = UncachedAddr(buf);
 		wav->st->attack_n = n;
 	}

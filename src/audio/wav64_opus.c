@@ -81,14 +81,14 @@ static void waveform_opus_read(void *ctx, samplebuffer_t *sbuf, int wpos, int wl
 
     if (seeking) {
         if (wpos == 0) {
-            lseek(wav->st->current_fd, wav->st->base_offset, SEEK_SET);
+            wav64_io_seek(wav, wav->st->base_offset);
         } else {
             wav64_opus_seekpoint_t *sp = wav64_opus_find_seekpoint(ext, wpos);
             assertf(sp && sp->sample_offset == (uint32_t)wpos,
                 "wav64: %s: invalid Opus seeking point: %d", wav->wave.name, wpos);
 
             // Seek directly to the preroll start frame and reset decoder state.
-            lseek(wav->st->current_fd, wav->st->base_offset + sp->file_offset_preroll, SEEK_SET);
+            wav64_io_seek(wav, wav->st->base_offset + sp->file_offset_preroll);
 
             // Clamp preroll (in case the target frame is at the beginning of the file)
             preroll_frames = MIN(ext->preroll_frames, wpos / ext->frame_size);
@@ -113,7 +113,7 @@ static void waveform_opus_read(void *ctx, samplebuffer_t *sbuf, int wpos, int wl
 
         // Read frame size
         uint16_t nb = 0;
-        read(wav->st->current_fd, &nb, 2);
+        wav64_io_read(wav, &nb, 2);
         assertf(nb <= ext->max_cmp_frame_size, "opus frame size too large: %08X (%ld)", nb, ext->max_cmp_frame_size);
 
         unsigned long aligned_frame_size = nb; 
@@ -123,7 +123,7 @@ static void waveform_opus_read(void *ctx, samplebuffer_t *sbuf, int wpos, int wl
 
         // Read frame
         data_cache_hit_writeback_invalidate(buf, aligned_frame_size);
-        int size = read(wav->st->current_fd, buf, aligned_frame_size);
+        int size = wav64_io_read(wav, buf, aligned_frame_size);
         assertf(size == aligned_frame_size, "opus read past end: %d", size);
 
         // Decode frame
