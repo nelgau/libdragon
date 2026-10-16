@@ -24,7 +24,6 @@ typedef struct mpeg1_s {
 	plm_frame_t *f;
 	int buffered_pics;
 	bool has_reader;        ///< Opened with video_open_reader
-	bool reader_blocking;   ///< The load callback may wait (only while opening)
 	bool reader_ended;      ///< The reader returned VIDEO_READ_END
 	bool loop;              ///< At the end of the data, rewind the reader and keep going
 	video_reader_t reader;  ///< Where the bytes come from (reader mode)
@@ -180,17 +179,12 @@ static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
 	return &mp1->video;
 }
 
-// Read from the reader: blocking only while opening (for the header).
-static int mpeg1_reader_read(mpeg1_t *mp1, uint8_t *dst, int len) {
-	return mp1->reader_blocking
-		? mp1->reader.read(mp1->reader.ctx, dst, len)
-		: mp1->reader.try_read(mp1->reader.ctx, dst, len);
-}
-
 // pl_mpeg calls this whenever it needs more bits than the buffer holds. It's
 // the reader-mode version of plm_buffer_load_file_callback, and follows its
 // rules: drop consumed bytes first if allowed (pl_mpeg forbids it while it
-// scans ahead and will step back), then append what fits.
+// scans ahead and will step back), then append what fits. It only ever uses
+// try_read: it's installed once the header is decoded (see
+// mpeg1_open_reader), and never waits.
 static void mpeg1_reader_load(plm_buffer_t *b, void *user) {
 	mpeg1_t *mp1 = (mpeg1_t *)user;
 	if (mp1->reader_ended)
@@ -203,7 +197,7 @@ static void mpeg1_reader_load(plm_buffer_t *b, void *user) {
 	if (space == 0)
 		return;
 
-	int n = mpeg1_reader_read(mp1, b->bytes + b->length, space);
+	int n = mp1->reader.try_read(mp1->reader.ctx, b->bytes + b->length, space);
 
 	if (n == VIDEO_READ_END && mp1->loop) {
 		// Looping: the stream goes on from its start. The decoder keeps its
@@ -212,7 +206,7 @@ static void mpeg1_reader_load(plm_buffer_t *b, void *user) {
 		// its own.
 		int err = mp1->reader.rewind(mp1->reader.ctx);
 		assertf(err == 0, "video reader: rewind failed (%d)", err);
-		n = mpeg1_reader_read(mp1, b->bytes + b->length, space);
+		n = mp1->reader.try_read(mp1->reader.ctx, b->bytes + b->length, space);
 		assertf(n != VIDEO_READ_END, "video reader: empty stream can't loop");
 	}
 
@@ -224,8 +218,25 @@ static void mpeg1_reader_load(plm_buffer_t *b, void *user) {
 		return;
 	}
 	assertf(n >= 0 && n <= space, "video reader returned %d (asked for at most %d)", n, space);
-	assertf(n > 0 || !mp1->reader_blocking, "video reader: read returned 0");
 	b->length += n;
+}
+
+/** @brief Largest MPEG-1 sequence header after its start code, in bytes: the
+ *         fixed fields plus two optional 64-byte quantization matrices (see
+ *         plm_video_decode_sequence_header). */
+#define MPEG1_SEQUENCE_HEADER_MAX   136
+
+// Is the whole sequence header (start code 00 00 01 B3 and what follows it)
+// in the buffer? Nothing has been consumed yet when this is used, so it
+// scans from the start.
+static bool mpeg1_header_in_buffer(plm_buffer_t *b) {
+	for (size_t i = 0; i + 4 <= b->length; i++) {
+		if (b->bytes[i] == 0x00 && b->bytes[i+1] == 0x00 &&
+			b->bytes[i+2] == 0x01 && b->bytes[i+3] == 0xB3) {
+			return i + 4 + MPEG1_SEQUENCE_HEADER_MAX <= b->length;
+		}
+	}
+	return false;
 }
 
 static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parms_t *parms) {
@@ -241,7 +252,6 @@ static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parm
 	mp1->buf = plm_buffer_create_with_capacity(size);
 	mp1->has_reader = true;
 	mp1->reader = *reader;
-	plm_buffer_set_load_callback(mp1->buf, mpeg1_reader_load, mp1);
 
 	mp1->v = plm_video_create_with_buffer(mp1->buf, true);
 	assert(mp1->v);
@@ -251,14 +261,24 @@ static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parm
 	plm_video_set_buffered_pics(mp1->v, mp1->buffered_pics);
 
 	// Like video_open, decode the header now, so the info is valid as soon as
-	// this returns. This is the only time the reader may block. A blocking
-	// read may still return less than the header needs, so keep going until
-	// the header is complete or the stream ends.
-	mp1->reader_blocking = true;
-	while (!plm_video_has_header(mp1->v)) {
-		assertf(!mp1->reader_ended, "invalid header in video stream\n");
+	// this returns. This is the only place the reader may block: read with it
+	// until the whole sequence header is in the buffer, then decode the
+	// header with no load callback installed, so pl_mpeg can't ask for more.
+	// (The optional LD_SAR user data comes before the header, so it's in the
+	// buffer too: pl_mpeg looks for it only once.) From then on the decoder
+	// pulls through the callback, which never waits.
+	plm_buffer_t *b = mp1->buf;
+	while (!mpeg1_header_in_buffer(b)) {
+		int space = b->capacity - b->length;
+		assertf(space > 0, "no MPEG1 sequence header in the first %d bytes", (int)b->capacity);
+		int n = mp1->reader.read(mp1->reader.ctx, b->bytes + b->length, space);
+		assertf(n != VIDEO_READ_END, "invalid header in video stream\n");
+		assertf(n > 0 && n <= space, "video reader: read returned %d (asked for at most %d)", n, space);
+		b->length += n;
 	}
-	mp1->reader_blocking = false;
+	bool has_header = plm_video_has_header(mp1->v);
+	assertf(has_header, "invalid header in video stream\n");
+	plm_buffer_set_load_callback(b, mpeg1_reader_load, mp1);
 
 	mpeg1_fill_info(mp1);
 	return &mp1->video;
