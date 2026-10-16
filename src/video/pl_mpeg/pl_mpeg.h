@@ -3114,8 +3114,13 @@ static void plm_video_unlock_frame(plm_video_t *self, const plm_frame_t *frame) 
 
 static int plm_video_find_free_b_buffer(plm_video_t *self) {
 	if (self->buffered_pics <= 0) return -1;
-	// Extra buffers are appended after the 3 reference buffers.
-	for (int i = 3; i < self->num_frame_buffers; i++) {
+	// Any buffer that's neither a reference nor locked (queued or on screen)
+	// is free. Not only the extra ones: references move into the extra
+	// buffers as they're redirected, and a search that skipped the first 3
+	// would lose them for good. Rewinding hid that (it unlocks everything);
+	// a looping stream never rewinds, so decode-ahead starved after a few
+	// passes.
+	for (int i = 0; i < self->num_frame_buffers; i++) {
 		if (self->frame_locked[i] == 0 && !plm_video_is_reference_index(self, i))
 			return i;
 	}
