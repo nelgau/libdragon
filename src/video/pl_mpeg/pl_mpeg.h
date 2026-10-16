@@ -665,6 +665,17 @@ void plm_video_destroy(plm_video_t *self);
 int plm_video_has_header(plm_video_t *self);
 
 
+// libdragon: get whether the whole sequence header (its start code and the
+// largest header that can follow it) is already in the buffer, without
+// reading anything, loading more, or moving the read position. When this is
+// true, plm_video_has_header() decodes the header from the buffer alone. Use
+// it to fill the buffer before the first plm_video_has_header(), which can't
+// simply be retried on partial data: it looks for the LD_SAR user data only
+// once, and a failed scan moves the read position past what it looked at.
+
+int plm_video_header_in_buffer(plm_video_t *self);
+
+
 // Get the framerate in frames per second.
 
 double plm_video_get_framerate(plm_video_t *self);
@@ -3340,9 +3351,30 @@ int plm_video_has_header(plm_video_t *self) {
 	return TRUE;
 }
 
+// The largest sequence header after its start code, in bits: the 64-bit
+// header and two optional 64-byte quantization matrices.
+static const int PLM_VIDEO_SEQUENCE_HEADER_MAX_BITS = 64 + 2 * 64 * 8;
+
+int plm_video_header_in_buffer(plm_video_t *self) {
+	if (self->has_sequence_header) {
+		return TRUE;
+	}
+	plm_buffer_t *b = self->buffer;
+	for (size_t i = b->bit_index >> 3; i + 4 <= b->length; i++) {
+		if (
+			b->bytes[i] == 0x00 &&
+			b->bytes[i + 1] == 0x00 &&
+			b->bytes[i + 2] == 0x01 &&
+			b->bytes[i + 3] == PLM_START_SEQUENCE
+		) {
+			return ((i + 4) << 3) + PLM_VIDEO_SEQUENCE_HEADER_MAX_BITS <= (b->length << 3);
+		}
+	}
+	return FALSE;
+}
+
 int plm_video_decode_sequence_header(plm_video_t *self) {
-	int max_header_size = 64 + 2 * 64 * 8; // 64 bit header + 2x 64 byte matrix
-	if (!plm_buffer_has(self->buffer, max_header_size)) {
+	if (!plm_buffer_has(self->buffer, PLM_VIDEO_SEQUENCE_HEADER_MAX_BITS)) {
 		return FALSE;
 	}
 

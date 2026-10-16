@@ -221,24 +221,6 @@ static void mpeg1_reader_load(plm_buffer_t *b, void *user) {
 	b->length += n;
 }
 
-/** @brief Largest MPEG-1 sequence header after its start code, in bytes: the
- *         fixed fields plus two optional 64-byte quantization matrices (see
- *         plm_video_decode_sequence_header). */
-#define MPEG1_SEQUENCE_HEADER_MAX   136
-
-// Is the whole sequence header (start code 00 00 01 B3 and what follows it)
-// in the buffer? Nothing has been consumed yet when this is used, so it
-// scans from the start.
-static bool mpeg1_header_in_buffer(plm_buffer_t *b) {
-	for (size_t i = 0; i + 4 <= b->length; i++) {
-		if (b->bytes[i] == 0x00 && b->bytes[i+1] == 0x00 &&
-			b->bytes[i+2] == 0x01 && b->bytes[i+3] == 0xB3) {
-			return i + 4 + MPEG1_SEQUENCE_HEADER_MAX <= b->length;
-		}
-	}
-	return false;
-}
-
 static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parms_t *parms) {
 	mpeg1_t *mp1 = malloc(sizeof(mpeg1_t));
 	assertf(mp1, "Out of memory");
@@ -268,7 +250,7 @@ static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parm
 	// buffer too: pl_mpeg looks for it only once.) From then on the decoder
 	// pulls through the callback, which never waits.
 	plm_buffer_t *b = mp1->buf;
-	while (!mpeg1_header_in_buffer(b)) {
+	while (!plm_video_header_in_buffer(mp1->v)) {
 		int space = b->capacity - b->length;
 		assertf(space > 0, "no MPEG1 sequence header in the first %d bytes", (int)b->capacity);
 		int n = mp1->reader.read(mp1->reader.ctx, b->bytes + b->length, space);
