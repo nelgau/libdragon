@@ -225,7 +225,7 @@ typedef struct {
 
 typedef struct {
 	double time;
-	int index;          // libdragon: position in display order (frames output before this one)
+	int index;          // libdragon: position in display order (from the GOP time code and temporal reference)
 	unsigned int width;
 	unsigned int height;
 	plm_plane_t y;
@@ -2259,6 +2259,7 @@ static const int PLM_START_SLICE_LAST = 0xAF;
 static const int PLM_START_PICTURE = 0x00;
 static const int PLM_START_EXTENSION = 0xB5;
 static const int PLM_START_USER_DATA = 0xB2;
+static const int PLM_START_GOP = 0xB8;
 
 #define PLM_START_IS_SLICE(c) \
 	(c >= PLM_START_SLICE_FIRST && c <= PLM_START_SLICE_LAST)
@@ -2678,6 +2679,8 @@ typedef struct plm_video_t {
 
 	int start_code;
 	int picture_type;
+	int temporal_reference;  // libdragon: display position of the picture within its GOP
+	int gop_frame;           // libdragon: display position of the current GOP's first picture
 
 	// Sequence header aspect_ratio_information code (4 bits, MPEG-1)
 	int aspect_ratio_code;
@@ -2978,8 +2981,58 @@ static inline int plm_video_is_frame_locked(plm_video_t *self, const plm_frame_t
 	return self->frame_locked[idx] != 0;
 }
 
+// libdragon: parse a GOP header (after its start code). Its time code says
+// where the GOP starts in display order; with each picture's temporal
+// reference, that gives every picture its index straight from the stream.
+// Returns 0 if the header isn't all in the buffer yet (nothing consumed).
+static int plm_video_parse_gop(plm_video_t *self) {
+	// Don't let a load triggered by this check discard the start code we may
+	// have to step back to.
+	int discard = self->buffer->discard_read_bytes;
+	self->buffer->discard_read_bytes = FALSE;
+	int complete = plm_buffer_has(self->buffer, 25);
+	self->buffer->discard_read_bytes = discard;
+	if (!complete) {
+		self->buffer->bit_index -= 32;  // back to the start code
+		return 0;
+	}
+	int drop_frame = plm_buffer_read(self->buffer, 1);
+	int hours = plm_buffer_read(self->buffer, 5);
+	int minutes = plm_buffer_read(self->buffer, 6);
+	plm_buffer_skip(self->buffer, 1);  // marker
+	int seconds = plm_buffer_read(self->buffer, 6);
+	int frames = plm_buffer_read(self->buffer, 6);
+	plm_buffer_skip(self->buffer, 2);  // closed_gop, broken_link
+
+	// Time codes count whole frames per second at the nominal rate (30 for
+	// 29.97); drop-frame time codes skip 2 frame numbers per minute (4 at
+	// 59.94), except every 10th minute.
+	int fps = (int)(self->framerate + 0.5);
+	int total_minutes = hours * 60 + minutes;
+	int index = (total_minutes * 60 + seconds) * fps + frames;
+	if (drop_frame) {
+		index -= (fps / 15) * (total_minutes - total_minutes / 10);
+	}
+	self->gop_frame = index;
+	return 1;
+}
+
+// libdragon: like plm_buffer_find_start_code(PLM_START_PICTURE), but parses
+// the GOP headers on the way.
+static int plm_video_find_picture(plm_video_t *self) {
+	while (TRUE) {
+		int code = plm_buffer_next_start_code(self->buffer);
+		if (code == PLM_START_GOP && !plm_video_parse_gop(self)) {
+			return -1;  // the rest of the GOP header hasn't arrived yet
+		}
+		if (code == PLM_START_PICTURE || code == -1) {
+			return code;
+		}
+	}
+}
+
 static inline int plm_video_parse_picture_header(plm_video_t *self) {
-	plm_buffer_skip(self->buffer, 10); // temporalReference
+	self->temporal_reference = plm_buffer_read(self->buffer, 10);
 	self->picture_type = plm_buffer_read(self->buffer, 3);
 	plm_buffer_skip(self->buffer, 16); // vbv_delay
 
@@ -3081,9 +3134,7 @@ static void plm_video_enqueue_output(plm_video_t *self, const plm_frame_t *frame
 
 static inline void plm_video_emit_output(plm_video_t *self, const plm_frame_t *frame) {
 	plm_video_enqueue_output(self, frame);
-	plm_frame_t *queued = &self->out_queue[(self->out_q_tail + self->buffered_pics - 1) % self->buffered_pics];
-	queued->time = self->time;
-	queued->index = self->frames_decoded;
+	self->out_queue[(self->out_q_tail + self->buffered_pics - 1) % self->buffered_pics].time = self->time;
 	self->frames_decoded++;
 	self->time = (double)self->frames_decoded / self->framerate;
 }
@@ -3123,7 +3174,7 @@ int plm_video_poll(plm_video_t *self) {
 	if (self->poll_state == PLM_POLL_STATE_IDLE) {
 		if (self->start_code != PLM_START_PICTURE) {
 			PROFILE_START(PS_MPEG_FINDSTART);
-			self->start_code = plm_buffer_find_start_code(self->buffer, PLM_START_PICTURE);
+			self->start_code = plm_video_find_picture(self);
 			PROFILE_STOP(PS_MPEG_FINDSTART);
 			self->poll_scanned = 0;
 
@@ -3204,6 +3255,10 @@ int plm_video_poll(plm_video_t *self) {
 			plm_video_init_frame(self, &self->frame_current,
 				self->frames_data + self->frame_data_size * (size_t)redirect_idx);
 		}
+
+		// libdragon: the picture's index travels with it (through reference
+		// rotation and the output queue).
+		self->frame_current.index = self->gop_frame + self->temporal_reference;
 
 		self->poll_state = PLM_POLL_STATE_IN_PICTURE;
 	}
