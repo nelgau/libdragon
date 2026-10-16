@@ -295,13 +295,6 @@ static video_status_t mpeg1_next_frame_status(video_t *v) {
 	return VIDEO_NEED_DATA;
 }
 
-// pl_mpeg tags each picture with its index as it enters the output queue,
-// so pictures decoded ahead keep the right index.
-static int mpeg1_frame_index(video_t *v) {
-	mpeg1_t *mp1 = (mpeg1_t *)v;
-	return mp1->f->index;
-}
-
 static void mpeg1_rewind(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	if (mp1->f) {
@@ -318,13 +311,18 @@ static void mpeg1_rewind(video_t *v) {
 	plm_video_rewind(mp1->v);
 }
 
-static yuv_frame_t mpeg1_get_frame(video_t *v) {
+static video_frame_t mpeg1_get_frame(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	plm_frame_t *frame = (plm_frame_t*)mp1->f;
 	surface_t yp  = surface_make_linear(frame->y.data,  FMT_I8, frame->width,   frame->height);
 	surface_t cbp = surface_make_linear(frame->cb.data, FMT_I8, frame->width/2, frame->height/2);
 	surface_t crp = surface_make_linear(frame->cr.data, FMT_I8, frame->width/2, frame->height/2);
-	return (yuv_frame_t){ .y = yp, .u = cbp, .v = crp };
+	// pl_mpeg tagged the picture with its index when it entered the output
+	// queue, so pictures decoded ahead keep the right index.
+	return (video_frame_t){
+		.yuv = { .y = yp, .u = cbp, .v = crp },
+		.index = frame->index,
+	};
 }
 
 static void mpeg1_close(video_t *v) {
@@ -366,5 +364,4 @@ video_codec_t mpeg1_codec = {
 	.get_frame = mpeg1_get_frame,
 	.rewind = mpeg1_rewind,
 	.open_reader = mpeg1_open_reader,
-	.frame_index = mpeg1_frame_index,
 };

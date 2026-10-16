@@ -187,11 +187,10 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame)
         return status;
     }
 
-    int index = v->codec->frame_index ? v->codec->frame_index(v) : v->next_index;
-    v->next_index = index + 1;
+    // The codec owns the frame, index included: only it knows which picture
+    // this is (it may have decoded ahead, rewound or looped since).
     if (frame) {
-        frame->yuv = v->codec->get_frame(v);
-        frame->index = index;
+        *frame = v->codec->get_frame(v);
     }
     return VIDEO_FRAME;
 }
@@ -199,7 +198,6 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame)
 void video_rewind(video_t *v)
 {
     v->codec->rewind(v);
-    v->next_index = 0;
 }
 
 int video_seek(video_t *v, int frame_idx)
@@ -208,16 +206,11 @@ int video_seek(video_t *v, int frame_idx)
         int keyframe_idx = frame_idx;
         uint32_t keyframe_off = video_seektable_lookup(v->seektable, &keyframe_idx);
         v->codec->seekfast(v, keyframe_idx, keyframe_off);
-        v->next_index = keyframe_idx;
         return keyframe_idx;
     }
 
     if (v->codec->seek) {
-        int idx = v->codec->seek(v, frame_idx);
-        if (idx >= 0) {
-            v->next_index = idx;
-        }
-        return idx;
+        return v->codec->seek(v, frame_idx);
     }
     
     return -1;

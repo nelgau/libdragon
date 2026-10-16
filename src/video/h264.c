@@ -110,6 +110,8 @@ typedef struct h264_s {
     uint32_t max_slice_size;            ///< Maximum size of a slice seen so far
     bool has_slice_metadata;            ///< True if the stream advertised max_slice_size
     int max_buffered_pics;              ///< Runtime-configured buffered pictures
+    int pic_index;                      ///< Index of the current picture (display order)
+    int next_index;                     ///< Index of the next picture to come out
     storage_t s;                        ///< H264 decoder main structure
     uint8_t buf[];                      ///< Internal buffered data
 } h264_t;
@@ -235,6 +237,7 @@ static void h264_rewind(video_t *v) {
     player->idx = 0;
     player->buf_len = 0;
     player->in_frame_decoding = false;
+    player->next_index = 0;
 
     if (player->s.dpb->buffer) {
         // Rewind: reset decoder state, keep existing allocations
@@ -400,30 +403,37 @@ static bool h264_next_frame(video_t *v)
     // Fetch one picture from the output buffer. It could be pending because
     // it's the first frame, or because previous calls to decode_loop have
     // decoded more than one picture
-    if (fetch_picture(player))
-        return true;
+    // The decoder outputs pictures in display order, and only this function
+    // takes them out for the caller, so counting here gives each one its
+    // index. (If this codec ever rewinds or loops on its own, count where
+    // pictures are output instead.)
+    if (!fetch_picture(player)) {
+        // If no picture was decoded yet, we need to keep decoding until
+        // one picture is ready.
+        if (!poll_loop(player))
+            return false;
 
-    // If no picture was decoded yet, we need to keep decoding until
-    // one picture is ready.
-    if (!poll_loop(player))
-        return false;
-
-    bool fetched = fetch_picture(player);
-    assertf(fetched, "Failed to fetch picture after decoding");
+        bool fetched = fetch_picture(player);
+        assertf(fetched, "Failed to fetch picture after decoding");
+    }
+    player->pic_index = player->next_index++;
     return true;
 }
 
-static yuv_frame_t h264_get_frame(video_t *v)
+static video_frame_t h264_get_frame(video_t *v)
 {
     h264_t *player = (h264_t*)v;
 
     int w = player->video.info.width, h = player->video.info.height;
     int w2 = w / 2, h2 = h / 2;
 
-    return (yuv_frame_t){
-        .y = surface_make(player->pic,                   FMT_I8, w,  h,  w),
-        .u = surface_make(player->pic + w * h,           FMT_I8, w2, h2, w2),
-        .v = surface_make(player->pic + w * h + w2 * h2, FMT_I8, w2, h2, w2),
+    return (video_frame_t){
+        .yuv = {
+            .y = surface_make(player->pic,                   FMT_I8, w,  h,  w),
+            .u = surface_make(player->pic + w * h,           FMT_I8, w2, h2, w2),
+            .v = surface_make(player->pic + w * h + w2 * h2, FMT_I8, w2, h2, w2),
+        },
+        .index = player->pic_index,
     };
 }
 
@@ -454,6 +464,7 @@ static void h264_seekfast(video_t *v, int frame_idx, uint32_t file_off)
 	lseek(player->fd, file_off, SEEK_SET);
     player->idx = 0;
     player->buf_len = 0;
+    player->next_index = frame_idx;
 }    
 
 void __h264_profile_init(void) {
