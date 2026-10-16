@@ -25,11 +25,11 @@
  * to query information about the video, such as width, height, framerate, etc.
  * 
  * To play the video, the main loop should call #video_next_frame any time
- * a new frame is needed (depending on the desired playback frequency),
- * and then #video_get_frame to get the frame to display. The frame is
- * returned as a #yuv_frame_t. You can then use the YUV library to display
- * it, either fullscreen, in a smaller portion, or even into an offscreen
- * surface to be used eg. like a texture.
+ * a new frame is needed (depending on the desired playback frequency).
+ * It returns the frame as a #video_frame_t: the picture (a #yuv_frame_t)
+ * and its position in the stream. You can then use the YUV library to
+ * display it, either fullscreen, in a smaller portion, or even into an
+ * offscreen surface to be used eg. like a texture.
  * 
  * In other words, this library only handles video decoding into a YUV surface
  * in memory. It does not perform any display by itself; it is up to the
@@ -110,10 +110,10 @@ typedef struct video_parms_s {
 } video_parms_t;
 
 /**
- * @brief Result of moving to the next frame (see #video_next_frame_status)
+ * @brief Result of moving to the next frame (see #video_next_frame)
  */
 typedef enum {
-    VIDEO_FRAME,        ///< A new frame was decoded; get it with #video_get_frame
+    VIDEO_FRAME,        ///< A new frame was decoded (returned in the #video_frame_t)
     VIDEO_NEED_DATA,    ///< #video_open_reader only: the reader has no data yet; try again later
     VIDEO_END,          ///< The stream is finished
 } video_status_t;
@@ -136,7 +136,7 @@ typedef enum {
  * * #read may block. It is used only by #video_open_reader, which waits
  *   for the stream's header so that #video_get_info is valid right away.
  * * #try_read must not block. It is used while decoding: if it has no data
- *   yet, #video_next_frame_status returns #VIDEO_NEED_DATA and the
+ *   yet, #video_next_frame returns #VIDEO_NEED_DATA and the
  *   application tries again later.
  *
  * The video copies this structure, and calls #close (if set) at
@@ -240,7 +240,7 @@ video_t* video_open(const char *fn, const video_parms_t *parms);
  * video_reader_t::read, which may block), so #video_get_info is valid right
  * away.
  *
- * During playback, use #video_next_frame_status: it returns
+ * During playback, #video_next_frame returns
  * #VIDEO_NEED_DATA when the reader had no data yet, and #VIDEO_END once the
  * reader reported the end of the stream and every frame was decoded.
  *
@@ -270,53 +270,45 @@ LIBDRAGON_PREVIEW_API
 video_info_t video_get_info(video_t *v);
 
 /**
+ * @brief A decoded video frame (see #video_next_frame)
+ */
+typedef struct video_frame_s {
+    yuv_frame_t yuv;    ///< The picture (Y, U and V planes), for the YUV library
+    /**
+     * @brief Position of the frame in the stream, in display order
+     *
+     * 0 is the first frame. It counts from 0 again after #video_rewind, and
+     * after #video_seek it's the frame seeked to. The time of the frame is
+     * index / video_info_t::framerate.
+     */
+    int index;
+} video_frame_t;
+
+/**
  * @brief Move to the next frame in the video stream
  * @preview
- * 
- * This function decodes the next frame in the video stream. If the frame
- * is successfully decoded, it can be retrieved with #video_get_frame. Otherwise,
- * the stream is finished and the function will return false.
  *
- * For a video opened with #video_open_reader, false can also mean that the
- * reader has no data yet; use #video_next_frame_status to tell the two apart.
+ * Decodes the next frame (or takes it from the frames already decoded
+ * ahead by #video_poll) and returns it in @p frame. If there is no frame,
+ * the return value says why: the stream is finished (#VIDEO_END), or, for a
+ * video opened with #video_open_reader, the reader has no data yet
+ * (#VIDEO_NEED_DATA; try again later).
  *
- * @param v             Handle to the video
- * @return true         If a frame was successfully decoded
- * @return false        If the stream is finished
- */
-LIBDRAGON_PREVIEW_API
-bool video_next_frame(video_t *v);
-
-/**
- * @brief Move to the next frame, and say why if there isn't one
- * @preview
- *
- * Same as #video_next_frame, but tells "no frame yet, the reader has no data"
- * (#video_open_reader only) apart from the end of the stream.
+ * The frame stays valid until the next call to #video_next_frame,
+ * #video_rewind, #video_seek or #video_close: the decoder keeps the picture
+ * until then, so it can be shown again (for example while paused).
  *
  * @param v             Handle to the video
+ * @param frame         Filled in with the frame when the result is
+ *                      #VIDEO_FRAME (can be NULL to skip a frame)
  * @return              #VIDEO_FRAME, #VIDEO_NEED_DATA or #VIDEO_END
- */
-LIBDRAGON_PREVIEW_API
-video_status_t video_next_frame_status(video_t *v);
-
-/**
- * @brief Retrieve the last fully-decoded frame
- * @preview
- * 
- * This function returns the last frame decoded by #video_poll or #video_next_frame.
- * The frame is returned as a #yuv_frame_t, which can be used to display the
- * frame on the screen via the yuv.h library.
- * 
- * @param v             Handle to the video
- * @return              The current decoded frame
- * 
+ *
  * @see #yuv_tex_blit
  * @see #yuv_blitter_new_fmv
  * @see #yuv_blitter_new
  */
 LIBDRAGON_PREVIEW_API
-yuv_frame_t video_get_frame(video_t *v);
+video_status_t video_next_frame(video_t *v, video_frame_t *frame);
 
 /**
  * @brief Do some work of video decoding

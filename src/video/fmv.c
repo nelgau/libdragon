@@ -118,6 +118,7 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
     }
 
     int frame_idx = 0;
+    video_frame_t frame = {0};      // the frame on screen (kept while paused)
     bool paused = false;
     bool abort = false;
     video_sync_t *vsync = NULL;
@@ -135,7 +136,7 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
         if (exact) {
             // Decode frames until we reach the exact frame
             while (frame_idx < idx) {
-                if (!video_next_frame(video)) break;
+                if (video_next_frame(video, NULL) != VIDEO_FRAME) break;
                 frame_idx++;
             }
         }
@@ -203,7 +204,7 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
                 }
             }
 
-            if (!video_next_frame(video)) {
+            if (video_next_frame(video, &frame) != VIDEO_FRAME) {
                 if (parms->loop) {
                     frame_idx = 0;
                     video_rewind(video);
@@ -233,9 +234,8 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
 
             rdpq_attach(disp, NULL);
 
-            // Get the next video frame and feed it into our previously set up blitter.
-            yuv_frame_t frame = video_get_frame(video);
-            yuv_blitter_run(&yuv, &frame);
+            // Feed the current video frame into our previously set up blitter.
+            yuv_blitter_run(&yuv, &frame.yuv);
 
             // Draw subtitles
             if (subs) {

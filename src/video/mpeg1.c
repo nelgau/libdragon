@@ -295,6 +295,13 @@ static video_status_t mpeg1_next_frame_status(video_t *v) {
 	return VIDEO_NEED_DATA;
 }
 
+// pl_mpeg tags each picture with its index as it enters the output queue,
+// so pictures decoded ahead keep the right index.
+static int mpeg1_frame_index(video_t *v) {
+	mpeg1_t *mp1 = (mpeg1_t *)v;
+	return mp1->f->index;
+}
+
 static void mpeg1_rewind(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	if (mp1->f) {
@@ -359,4 +366,5 @@ video_codec_t mpeg1_codec = {
 	.get_frame = mpeg1_get_frame,
 	.rewind = mpeg1_rewind,
 	.open_reader = mpeg1_open_reader,
+	.frame_index = mpeg1_frame_index,
 };

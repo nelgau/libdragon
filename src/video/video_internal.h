@@ -20,6 +20,7 @@ typedef struct video_s {
     video_info_t info;              ///< Video information
     video_codec_t *codec;           ///< Codec used to decode this video
     video_seektable_t *seektable;      ///< Optional seek table for fast seeking
+    int next_index;                 ///< Index of the next frame, for codecs without frame_index
 } video_t;
 
 /** @brief Video codec structure */
@@ -38,6 +39,11 @@ typedef struct video_codec_s {
     // also used in file mode when present (next_frame is then not needed).
     video_t* (*open_reader)(const video_reader_t *reader, const video_parms_t *parms); ///< Open from a reader
     video_status_t (*next_frame_status)(video_t *v);    ///< next_frame, with a reason
+
+    // Optional: index of the current frame (see video_frame_t::index). A
+    // codec that decodes ahead must tag each picture as it's decoded, so the
+    // index travels with it. Without this hook, video.c counts frames.
+    int (*frame_index)(video_t *v);
 
     struct video_codec_s* next_codec;       ///< Next registered codec
 } video_codec_t;

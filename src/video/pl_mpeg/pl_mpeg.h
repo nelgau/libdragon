@@ -225,6 +225,7 @@ typedef struct {
 
 typedef struct {
 	double time;
+	int index;          // libdragon: position in display order (frames output before this one)
 	unsigned int width;
 	unsigned int height;
 	plm_plane_t y;
@@ -3080,7 +3081,9 @@ static void plm_video_enqueue_output(plm_video_t *self, const plm_frame_t *frame
 
 static inline void plm_video_emit_output(plm_video_t *self, const plm_frame_t *frame) {
 	plm_video_enqueue_output(self, frame);
-	self->out_queue[(self->out_q_tail + self->buffered_pics - 1) % self->buffered_pics].time = self->time;
+	plm_frame_t *queued = &self->out_queue[(self->out_q_tail + self->buffered_pics - 1) % self->buffered_pics];
+	queued->time = self->time;
+	queued->index = self->frames_decoded;
 	self->frames_decoded++;
 	self->time = (double)self->frames_decoded / self->framerate;
 }

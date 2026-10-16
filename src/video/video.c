@@ -174,28 +174,32 @@ int video_poll(video_t *v)
     return v->codec->poll(v);
 }
 
-video_status_t video_next_frame_status(video_t *v)
+video_status_t video_next_frame(video_t *v, video_frame_t *frame)
 {
+    video_status_t status;
     if (v->codec->next_frame_status) {
-        return v->codec->next_frame_status(v);
+        status = v->codec->next_frame_status(v);
+    } else {
+        // Codecs without reader mode: no frame always means the end.
+        status = v->codec->next_frame(v) ? VIDEO_FRAME : VIDEO_END;
     }
-    // Codecs without reader mode: no frame always means the end.
-    return v->codec->next_frame(v) ? VIDEO_FRAME : VIDEO_END;
-}
+    if (status != VIDEO_FRAME) {
+        return status;
+    }
 
-bool video_next_frame(video_t *v)
-{
-    return video_next_frame_status(v) == VIDEO_FRAME;
-}
-
-yuv_frame_t video_get_frame(video_t *v)
-{
-    return v->codec->get_frame(v);
+    int index = v->codec->frame_index ? v->codec->frame_index(v) : v->next_index;
+    v->next_index = index + 1;
+    if (frame) {
+        frame->yuv = v->codec->get_frame(v);
+        frame->index = index;
+    }
+    return VIDEO_FRAME;
 }
 
 void video_rewind(video_t *v)
 {
     v->codec->rewind(v);
+    v->next_index = 0;
 }
 
 int video_seek(video_t *v, int frame_idx)
@@ -204,11 +208,16 @@ int video_seek(video_t *v, int frame_idx)
         int keyframe_idx = frame_idx;
         uint32_t keyframe_off = video_seektable_lookup(v->seektable, &keyframe_idx);
         v->codec->seekfast(v, keyframe_idx, keyframe_off);
+        v->next_index = keyframe_idx;
         return keyframe_idx;
     }
 
     if (v->codec->seek) {
-        return v->codec->seek(v, frame_idx);
+        int idx = v->codec->seek(v, frame_idx);
+        if (idx >= 0) {
+            v->next_index = idx;
+        }
+        return idx;
     }
     
     return -1;
