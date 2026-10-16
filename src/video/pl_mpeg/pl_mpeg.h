@@ -1602,9 +1602,21 @@ int plm_buffer_has(plm_buffer_t *self, size_t count) {
 	return FALSE;
 }
 
+// Peek at the next 64 bits without consuming them. Bits past the end of the
+// data read as 0, like plm_buffer_read() at the end of the stream. (Returning
+// 0 for all 64 bits instead would decode the last few bytes of a stream as
+// zeros: the end of its last slice was lost.)
 uint64_t plm_buffer_showbits(plm_buffer_t *self) {
-	if (!plm_buffer_has(self, 64))
-		return 0;
+	if (!plm_buffer_has(self, 64)) {
+		uint64_t bits = 0;
+		size_t first = self->bit_index >> 3;
+		for (size_t i = 0; i < 8; i++) {
+			bits <<= 8;
+			if (first + i < self->length)
+				bits |= self->bytes[first + i];
+		}
+		return bits << (self->bit_index & 7);
+	}
 
 	typedef uint64_t u_uint64_t __attribute__((aligned(1)));
 
@@ -1728,7 +1740,10 @@ int plm_buffer_has_start_code_resume(plm_buffer_t *self, int code, size_t *scann
 
 int plm_buffer_peek_non_zero(plm_buffer_t *self, int bit_count) {
 	if (!plm_buffer_has(self, bit_count)) {
-		return FALSE;
+		// Near the end of the stream: bits past the end read as 0. Returning
+		// FALSE here instead ended the last slice early when the stream has
+		// no end code after it.
+		return (plm_buffer_showbits(self) >> (64 - bit_count)) != 0;
 	}
 
 	int val = plm_buffer_read(self, bit_count);
@@ -3110,14 +3125,15 @@ int plm_video_poll(plm_video_t *self) {
 			self->poll_scanned = 0;
 
 			if (self->start_code == -1) {
-				// End-of-stream flush: return last reference frame once, same as plm_video_decode().
+				// End-of-stream flush: return the last reference frame once.
+				// It's still pending whatever the last decoded picture was:
+				// B pictures are shown before their backward reference, so a
+				// stream usually ends (in decoding order) with B pictures,
+				// and their reference is the last frame to show.
 				if (
 					self->has_reference_frame &&
 					!self->assume_no_b_frames &&
-					plm_buffer_has_ended(self->buffer) && (
-						self->picture_type == PLM_VIDEO_PICTURE_TYPE_INTRA ||
-						self->picture_type == PLM_VIDEO_PICTURE_TYPE_PREDICTIVE
-					)
+					plm_buffer_has_ended(self->buffer)
 				) {
 					self->has_reference_frame = FALSE;
 					plm_video_emit_output(self, &self->frame_backward);
