@@ -311,6 +311,27 @@ LIBDRAGON_PREVIEW_API
 video_status_t video_next_frame(video_t *v, video_frame_t *frame);
 
 /**
+ * @brief Make the video loop
+ * @preview
+ *
+ * With looping on, the decoder never reaches the end of the stream: when its
+ * data runs out it goes back to the start and keeps decoding, so the
+ * pictures decoded ahead (see #video_poll) carry on across the loop and the
+ * first frames of the next pass are ready in time. #video_next_frame never
+ * returns #VIDEO_END; the start of each pass is the frame whose
+ * video_frame_t::index is 0.
+ *
+ * Only for videos opened with #video_open_reader (the decoder rewinds the
+ * reader itself), and not every codec supports it; this asserts if it can't
+ * loop.
+ *
+ * @param v             Handle to the video
+ * @param loop          true to loop
+ */
+LIBDRAGON_PREVIEW_API
+void video_set_loop(video_t *v, bool loop);
+
+/**
  * @brief Do some work of video decoding
  * @preview
  * 

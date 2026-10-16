@@ -195,6 +195,12 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame)
     return VIDEO_FRAME;
 }
 
+void video_set_loop(video_t *v, bool loop)
+{
+    assertf(v->codec->set_loop, "Codec %s can't loop", v->codec->extension);
+    v->codec->set_loop(v, loop);
+}
+
 void video_rewind(video_t *v)
 {
     v->codec->rewind(v);

@@ -26,6 +26,7 @@ typedef struct mpeg1_s {
 	bool has_reader;        ///< Opened with video_open_reader
 	bool reader_blocking;   ///< The load callback may wait (only while opening)
 	bool reader_ended;      ///< The reader returned VIDEO_READ_END
+	bool loop;              ///< At the end of the data, rewind the reader and keep going
 	video_reader_t reader;  ///< Where the bytes come from (reader mode)
 } mpeg1_t;
 
@@ -179,6 +180,13 @@ static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
 	return &mp1->video;
 }
 
+// Read from the reader: blocking only while opening (for the header).
+static int mpeg1_reader_read(mpeg1_t *mp1, uint8_t *dst, int len) {
+	return mp1->reader_blocking
+		? mp1->reader.read(mp1->reader.ctx, dst, len)
+		: mp1->reader.try_read(mp1->reader.ctx, dst, len);
+}
+
 // pl_mpeg calls this whenever it needs more bits than the buffer holds. It's
 // the reader-mode version of plm_buffer_load_file_callback, and follows its
 // rules: drop consumed bytes first if allowed (pl_mpeg forbids it while it
@@ -195,9 +203,18 @@ static void mpeg1_reader_load(plm_buffer_t *b, void *user) {
 	if (space == 0)
 		return;
 
-	int n = mp1->reader_blocking
-		? mp1->reader.read(mp1->reader.ctx, b->bytes + b->length, space)
-		: mp1->reader.try_read(mp1->reader.ctx, b->bytes + b->length, space);
+	int n = mpeg1_reader_read(mp1, b->bytes + b->length, space);
+
+	if (n == VIDEO_READ_END && mp1->loop) {
+		// Looping: the stream goes on from its start. The decoder keeps its
+		// state and skips the repeated header; each picture's index comes
+		// from the stream (GOP time code), so the new pass starts at 0 on
+		// its own.
+		int err = mp1->reader.rewind(mp1->reader.ctx);
+		assertf(err == 0, "video reader: rewind failed (%d)", err);
+		n = mpeg1_reader_read(mp1, b->bytes + b->length, space);
+		assertf(n != VIDEO_READ_END, "video reader: empty stream can't loop");
+	}
 
 	if (n == VIDEO_READ_END) {
 		// Like file mode at EOF: "ended" means no more bytes will arrive.
@@ -295,6 +312,12 @@ static video_status_t mpeg1_next_frame_status(video_t *v) {
 	return VIDEO_NEED_DATA;
 }
 
+static void mpeg1_set_loop(video_t *v, bool loop) {
+	mpeg1_t *mp1 = (mpeg1_t *)v;
+	assertf(mp1->has_reader, "MPEG1: looping needs video_open_reader");
+	mp1->loop = loop;
+}
+
 static void mpeg1_rewind(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	if (mp1->f) {
@@ -364,4 +387,5 @@ video_codec_t mpeg1_codec = {
 	.get_frame = mpeg1_get_frame,
 	.rewind = mpeg1_rewind,
 	.open_reader = mpeg1_open_reader,
+	.set_loop = mpeg1_set_loop,
 };

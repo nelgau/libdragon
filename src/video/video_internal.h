@@ -38,6 +38,7 @@ typedef struct video_codec_s {
     // also used in file mode when present (next_frame is then not needed).
     video_t* (*open_reader)(const video_reader_t *reader, const video_parms_t *parms); ///< Open from a reader
     video_status_t (*next_frame_status)(video_t *v);    ///< next_frame, with a reason
+    void (*set_loop)(video_t *v, bool loop);            ///< Optional: see video_set_loop
 
     struct video_codec_s* next_codec;       ///< Next registered codec
 } video_codec_t;
