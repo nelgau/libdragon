@@ -1395,6 +1395,7 @@ void plm_buffer_skip(plm_buffer_t *self, size_t count);
 int plm_buffer_skip_bytes(plm_buffer_t *self, uint8_t v);
 int plm_buffer_next_start_code(plm_buffer_t *self);
 int plm_buffer_find_start_code(plm_buffer_t *self, int code);
+int plm_buffer_has_start_code_resume(plm_buffer_t *self, int code, size_t *scanned);
 int plm_buffer_no_start_code(plm_buffer_t *self);
 int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_t *table);
 uint16_t plm_buffer_read_vlc_uint(plm_buffer_t *self, const plm_vlc_uint_t *table);
@@ -1697,6 +1698,28 @@ int plm_buffer_has_start_code(plm_buffer_t *self, int code) {
 	
 	self->discard_read_bytes = FALSE;
 	int current = plm_buffer_find_start_code(self, code);
+
+	self->bit_index = previous_bit_index;
+	self->discard_read_bytes = previous_discard_read_bytes;
+	return current;
+}
+
+// libdragon: like plm_buffer_has_start_code, but a scan that fails remembers
+// how far it got (*scanned: bytes past the read position, which must be byte
+// aligned), and the next call resumes from there instead of rescanning. The
+// result is the same as a full scan: a failed scan stops where fewer than 5
+// bytes are left, so every position before that was fully checked. Callers
+// reset *scanned to 0 whenever the read position moves.
+int plm_buffer_has_start_code_resume(plm_buffer_t *self, int code, size_t *scanned) {
+	size_t previous_bit_index = self->bit_index;
+	int previous_discard_read_bytes = self->discard_read_bytes;
+
+	self->discard_read_bytes = FALSE;
+	self->bit_index = previous_bit_index + (*scanned << 3);
+	int current = plm_buffer_find_start_code(self, code);
+	if (current == -1) {
+		*scanned = (self->bit_index - previous_bit_index) >> 3;
+	}
 
 	self->bit_index = previous_bit_index;
 	self->discard_read_bytes = previous_discard_read_bytes;
@@ -2691,6 +2714,8 @@ typedef struct plm_video_t {
 	plm_frame_t poll_frame_temp;      // saved from picture start (old frame_forward)
 	int poll_saved_current_valid;     // for B pictures only
 	plm_frame_t poll_saved_current;   // original frame_current to restore after B decode
+	size_t poll_scanned;              // bytes after the picture start already searched
+	                                  // for the next picture start (see has_start_code_resume)
 
 	int16_t block_data[64];
 	uint8_t intra_quant_matrix[64];
@@ -2879,6 +2904,7 @@ void plm_video_rewind(plm_video_t *self) {
 	self->out_current_in_use = 0;
 	self->poll_state = PLM_POLL_STATE_IDLE;
 	self->poll_saved_current_valid = 0;
+	self->poll_scanned = 0;
 	if (self->frame_locked && self->num_frame_buffers > 0) {
 		memset(self->frame_locked, 0, (size_t)self->num_frame_buffers);
 	}
@@ -3081,6 +3107,7 @@ int plm_video_poll(plm_video_t *self) {
 			PROFILE_START(PS_MPEG_FINDSTART);
 			self->start_code = plm_buffer_find_start_code(self->buffer, PLM_START_PICTURE);
 			PROFILE_STOP(PS_MPEG_FINDSTART);
+			self->poll_scanned = 0;
 
 			if (self->start_code == -1) {
 				// End-of-stream flush: return last reference frame once, same as plm_video_decode().
@@ -3101,15 +3128,18 @@ int plm_video_poll(plm_video_t *self) {
 		}
 
 		// Ensure we have a full picture in the buffer (same strategy as plm_video_decode()).
+		// When data arrives incrementally (reader mode), this check fails and is
+		// retried as bytes come in; each retry only scans the new bytes.
 		PROFILE_START(PS_MPEG_HASSTART);
 		if (
-			plm_buffer_has_start_code(self->buffer, PLM_START_PICTURE) == -1 &&
+			plm_buffer_has_start_code_resume(self->buffer, PLM_START_PICTURE, &self->poll_scanned) == -1 &&
 			!plm_buffer_has_ended(self->buffer)
 		) {
 			PROFILE_STOP(PS_MPEG_HASSTART);
 			return 0;
 		}
 		PROFILE_STOP(PS_MPEG_HASSTART);
+		self->poll_scanned = 0;
 
 		if (!plm_video_parse_picture_header(self)) {
 			// Skip unsupported picture types
