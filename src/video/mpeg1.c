@@ -26,8 +26,6 @@ typedef struct mpeg1_s {
 	bool has_reader;        ///< Opened with video_open_reader
 	bool reader_blocking;   ///< The load callback may wait (only while opening)
 	bool reader_ended;      ///< The reader returned VIDEO_READ_END
-	bool reader_waiting;    ///< The last next_frame_status was VIDEO_NEED_DATA
-	uint32_t reader_got;    ///< Bytes delivered by the reader so far
 	video_reader_t reader;  ///< Where the bytes come from (reader mode)
 } mpeg1_t;
 
@@ -211,7 +209,6 @@ static void mpeg1_reader_load(plm_buffer_t *b, void *user) {
 	assertf(n >= 0 && n <= space, "video reader returned %d (asked for at most %d)", n, space);
 	assertf(n > 0 || !mp1->reader_blocking, "video reader: read returned 0");
 	b->length += n;
-	mp1->reader_got += n;
 }
 
 static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parms_t *parms) {
@@ -267,25 +264,14 @@ static video_status_t mpeg1_next_frame_status(video_t *v) {
 		mp1->f = NULL;
 	}
 
+	// Reader mode: while pl_mpeg scans ahead for the next picture it doesn't
+	// let the load callback discard consumed bytes. If that left the buffer
+	// full, make room now (everything before the read position is consumed).
+	// Retrying after VIDEO_NEED_DATA is cheap: the scan resumes where it
+	// stopped, so with no new bytes it only asks the reader once.
 	plm_buffer_t *b = mp1->buf;
-	if (mp1->has_reader) {
-		// While pl_mpeg scans ahead for the next picture it doesn't let the
-		// load callback discard consumed bytes. If that left the buffer full,
-		// make room now (everything before the read position is consumed).
-		if (b->length == b->capacity)
-			plm_buffer_discard_read_bytes(b);
-
-		// If the last call ran out of data, nothing can have changed until
-		// the reader delivers more bytes: ask it directly, and only go back
-		// into the decoder if it did (or if the stream ended).
-		if (mp1->reader_waiting) {
-			uint32_t got = mp1->reader_got;
-			mpeg1_reader_load(b, mp1);
-			if (mp1->reader_got == got && !mp1->reader_ended)
-				return VIDEO_NEED_DATA;
-			mp1->reader_waiting = false;
-		}
-	}
+	if (mp1->has_reader && b->length == b->capacity)
+		plm_buffer_discard_read_bytes(b);
 
 	PROFILE_START(PS_MPEG);
 	mp1->f = plm_video_decode(mp1->v);
@@ -306,7 +292,6 @@ static video_status_t mpeg1_next_frame_status(video_t *v) {
 	assertf(unread < b->capacity,
 		"MPEG1 reader buffer (%d bytes) is too small for a compressed picture; "
 		"raise video_parms_t::reader_buffer_size", (int)b->capacity);
-	mp1->reader_waiting = true;
 	return VIDEO_NEED_DATA;
 }
 
@@ -322,7 +307,6 @@ static void mpeg1_rewind(video_t *v) {
 		int err = mp1->reader.rewind(mp1->reader.ctx);
 		assertf(err == 0, "video reader: rewind failed (%d)", err);
 		mp1->reader_ended = false;
-		mp1->reader_waiting = false;
 	}
 	plm_video_rewind(mp1->v);
 }
