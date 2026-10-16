@@ -34,6 +34,11 @@ typedef struct video_codec_s {
     void (*seekfast)(video_t *v, int frame_idx, uint32_t offset); ///< Seek to a specific keyframe
     int (*seek)(video_t *v, int frame_idx);    ///< Seek to a specific frame index
 
+    // Optional: reader mode (see video_open_reader). next_frame_status is
+    // also used in file mode when present (next_frame is then not needed).
+    video_t* (*open_reader)(const video_reader_t *reader, const video_parms_t *parms); ///< Open from a reader
+    video_status_t (*next_frame_status)(video_t *v);    ///< next_frame, with a reason
+
     struct video_codec_s* next_codec;       ///< Next registered codec
 } video_codec_t;
 

@@ -97,7 +97,79 @@ typedef struct video_parms_s {
      * If 0 (default), #video_poll is effectively disabled and cannot decode ahead.
      */
     int buffered_pics;
+
+    /**
+     * @brief #video_open_reader only: size in bytes of the compressed-data buffer
+     *
+     * The decoder reads from the #video_reader_t into this buffer, which
+     * never grows. It must hold at least one complete compressed picture
+     * plus the start of the next one; the decoder asserts if a picture
+     * can't fit. If 0 (default), 32 KiB.
+     */
+    int reader_buffer_size;
 } video_parms_t;
+
+/**
+ * @brief Result of moving to the next frame (see #video_next_frame_status)
+ */
+typedef enum {
+    VIDEO_FRAME,        ///< A new frame was decoded; get it with #video_get_frame
+    VIDEO_NEED_DATA,    ///< #video_open_reader only: the reader has no data yet; try again later
+    VIDEO_END,          ///< The stream is finished
+} video_status_t;
+
+/** @brief Returned by the read functions of a #video_reader_t at the end of the stream */
+#define VIDEO_READ_END      (-1)
+
+/**
+ * @brief Where a video reads its compressed bytes from (see #video_open_reader)
+ * @preview
+ *
+ * By default a video reads its file through the filesystem (#video_open).
+ * A reader lets the application supply the bytes itself instead, for example
+ * from its own cache or streaming system, without the decoder ever waiting
+ * on slow storage in the middle of playback.
+ *
+ * The decoder reads the stream in order, from the start. It has two ways to
+ * read:
+ *
+ * * #read may block. It is used only by #video_open_reader, which waits
+ *   for the stream's header so that #video_get_info is valid right away.
+ * * #try_read must not block. It is used while decoding: if it has no data
+ *   yet, #video_next_frame_status returns #VIDEO_NEED_DATA and the
+ *   application tries again later.
+ *
+ * The video copies this structure, and calls #close (if set) at
+ * #video_close.
+ */
+typedef struct video_reader_s {
+    /** @brief Opaque pointer passed to every callback. */
+    void *ctx;
+    /**
+     * @brief Read up to len bytes into dst, waiting if needed.
+     *
+     * Returns the number of bytes read (at least 1), or #VIDEO_READ_END if
+     * the stream has no more bytes.
+     */
+    int (*read)(void *ctx, void *dst, int len);
+    /**
+     * @brief Read up to len bytes into dst, without waiting.
+     *
+     * Returns the number of bytes read, 0 if none are available yet, or
+     * #VIDEO_READ_END if the stream has no more bytes.
+     */
+    int (*try_read)(void *ctx, void *dst, int len);
+    /**
+     * @brief Move the read position back to the start of the stream.
+     *
+     * Called by #video_rewind. Returns 0 on success. The decoder remembers
+     * the header, so after a rewind it only needs the bytes that follow it,
+     * through #try_read.
+     */
+    int (*rewind)(void *ctx);
+    /** @brief Optional: release whatever ctx holds. */
+    void (*close)(void *ctx);
+} video_reader_t;
 
 /**
  * @brief Information about a video stream
@@ -159,6 +231,31 @@ LIBDRAGON_PREVIEW_API
 video_t* video_open(const char *fn, const video_parms_t *parms);
 
 /**
+ * @brief Open a video whose bytes come from an application-supplied reader
+ * @preview
+ *
+ * Same as #video_open, except that every byte is read through @p reader
+ * instead of a file, and the codec is given explicitly. Like #video_open,
+ * this reads the stream's header before returning (with
+ * video_reader_t::read, which may block), so #video_get_info is valid right
+ * away.
+ *
+ * During playback, use #video_next_frame_status: it returns
+ * #VIDEO_NEED_DATA when the reader had no data yet, and #VIDEO_END once the
+ * reader reported the end of the stream and every frame was decoded.
+ *
+ * Not every codec supports readers; this asserts if @p codec doesn't.
+ *
+ * @param codec         Codec to decode with (for example, &mpeg1_codec)
+ * @param reader        Where to read the bytes from (copied)
+ * @param parms         Optional parameter block (can be NULL)
+ * @return              Handle to the opened video
+ */
+LIBDRAGON_PREVIEW_API
+video_t* video_open_reader(video_codec_t *codec, const video_reader_t *reader,
+    const video_parms_t *parms);
+
+/**
  * @brief Get information about the video
  * @preview
  * 
@@ -179,13 +276,29 @@ video_info_t video_get_info(video_t *v);
  * This function decodes the next frame in the video stream. If the frame
  * is successfully decoded, it can be retrieved with #video_get_frame. Otherwise,
  * the stream is finished and the function will return false.
- * 
+ *
+ * For a video opened with #video_open_reader, false can also mean that the
+ * reader has no data yet; use #video_next_frame_status to tell the two apart.
+ *
  * @param v             Handle to the video
  * @return true         If a frame was successfully decoded
  * @return false        If the stream is finished
  */
 LIBDRAGON_PREVIEW_API
 bool video_next_frame(video_t *v);
+
+/**
+ * @brief Move to the next frame, and say why if there isn't one
+ * @preview
+ *
+ * Same as #video_next_frame, but tells "no frame yet, the reader has no data"
+ * (#video_open_reader only) apart from the end of the stream.
+ *
+ * @param v             Handle to the video
+ * @return              #VIDEO_FRAME, #VIDEO_NEED_DATA or #VIDEO_END
+ */
+LIBDRAGON_PREVIEW_API
+video_status_t video_next_frame_status(video_t *v);
 
 /**
  * @brief Retrieve the last fully-decoded frame
@@ -239,7 +352,10 @@ int video_poll(video_t *v);
 /**
  * @brief Rewind the video to the beginning
  * @preview
- * 
+ *
+ * For a video opened with #video_open_reader, this calls
+ * video_reader_t::rewind.
+ *
  * @param v             Handle to the video
  */
 LIBDRAGON_PREVIEW_API
@@ -287,7 +403,10 @@ bool video_is_seekable(video_t *v, int frame_idx);
 /**
  * @brief Close the video file
  * @preview
- * 
+ *
+ * For a video opened with #video_open_reader, this calls
+ * video_reader_t::close (if set).
+ *
  * @param v             Handle to the video
  */
 LIBDRAGON_PREVIEW_API

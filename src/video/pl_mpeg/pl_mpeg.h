@@ -2726,21 +2726,7 @@ void plm_video_decode_block(plm_video_t *self, int block);
 void plm_video_decode_block_residual(int16_t *s, int si, uint8_t *d, int di, int dw, int n, int intra);
 void plm_video_idct(int16_t *block);
 
-static void plm_video_parse_initial_userdata(plm_video_t *self) {
-	// Parse libdragon proprietary SAR from an initial user_data block:
-	//   00 00 01 B2 "LD_SAR=NUM:DEN\n"
-	//
-	// This is intentionally done lazily (not in create_with_buffer) to avoid
-	// triggering I/O during object creation. We only support this scan for
-	// buffers that can seek to 0 (file / fixed memory / append).
-	if (self->sar_parsed) return;
-	self->sar_parsed = TRUE;
-
-	if (self->buffer->mode == PLM_BUFFER_MODE_RING) return;
-
-	size_t prev_pos = plm_buffer_tell(self->buffer);
-	plm_buffer_seek(self->buffer, 0);
-
+static void plm_video_scan_initial_userdata(plm_video_t *self) {
 	while (TRUE) {
 		int code = plm_buffer_next_start_code(self->buffer);
 		if (code == -1) break;
@@ -2761,7 +2747,34 @@ static void plm_video_parse_initial_userdata(plm_video_t *self) {
 			}
 		}
 	}
+}
 
+static void plm_video_parse_initial_userdata(plm_video_t *self) {
+	// Parse libdragon proprietary SAR from an initial user_data block:
+	//   00 00 01 B2 "LD_SAR=NUM:DEN\n"
+	//
+	// This is intentionally done lazily (not in create_with_buffer) to avoid
+	// triggering I/O during object creation.
+	if (self->sar_parsed) return;
+	self->sar_parsed = TRUE;
+
+	if (self->buffer->mode == PLM_BUFFER_MODE_RING) {
+		// A ring buffer can't seek back to 0. But if nothing was consumed
+		// yet (as when video_open_reader decodes the header), the start of
+		// the stream is still at the read position: scan from there without
+		// discarding anything, then step back.
+		if (self->buffer->bit_index != 0) return;
+		int prev_discard = self->buffer->discard_read_bytes;
+		self->buffer->discard_read_bytes = FALSE;
+		plm_video_scan_initial_userdata(self);
+		self->buffer->bit_index = 0;
+		self->buffer->discard_read_bytes = prev_discard;
+		return;
+	}
+
+	size_t prev_pos = plm_buffer_tell(self->buffer);
+	plm_buffer_seek(self->buffer, 0);
+	plm_video_scan_initial_userdata(self);
 	plm_buffer_seek(self->buffer, prev_pos);
 }
 

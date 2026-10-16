@@ -140,6 +140,20 @@ video_t* video_open(const char *fn, const video_parms_t *parms)
     return NULL;
 }
 
+video_t* video_open_reader(video_codec_t *codec, const video_reader_t *reader,
+    const video_parms_t *parms)
+{
+    assertf(codec && codec->open_reader, "Codec %s doesn't support readers",
+        codec ? codec->extension : "(null)");
+    assertf(reader && reader->read && reader->try_read && reader->rewind,
+        "video_open_reader: the reader needs read, try_read and rewind");
+    video_t *v = codec->open_reader(reader, parms);
+    if (v) {
+        v->codec = codec;
+    }
+    return v;
+}
+
 void video_close(video_t *v)
 {
     if (v->seektable) {
@@ -160,9 +174,18 @@ int video_poll(video_t *v)
     return v->codec->poll(v);
 }
 
+video_status_t video_next_frame_status(video_t *v)
+{
+    if (v->codec->next_frame_status) {
+        return v->codec->next_frame_status(v);
+    }
+    // Codecs without reader mode: no frame always means the end.
+    return v->codec->next_frame(v) ? VIDEO_FRAME : VIDEO_END;
+}
+
 bool video_next_frame(video_t *v)
 {
-    return v->codec->next_frame(v);
+    return video_next_frame_status(v) == VIDEO_FRAME;
 }
 
 yuv_frame_t video_get_frame(video_t *v)
