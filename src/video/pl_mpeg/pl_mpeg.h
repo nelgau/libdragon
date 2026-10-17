@@ -2853,7 +2853,28 @@ plm_video_t * plm_video_create_with_buffer(plm_buffer_t *buffer, int destroy_whe
 	return self;
 }
 
+// libdragon: the RSP holds one pair of quantization matrices (rsp_mpeg1.S,
+// in its saved state): whichever a decoder sent last. Each decoder sends its
+// own when it decodes its sequence header, once, at open. With several
+// decoders taking turns, a decoder would then decode with the matrices of
+// whichever opened last; so before decoding a slice, a decoder sends its own
+// again if they aren't the ones loaded. A slice is the unit of work
+// (plm_video_poll decodes one), and nothing else on the RSP carries over
+// from one slice to the next.
+static const plm_video_t *plm_video_rsp_matrices_owner;
+
+static void plm_video_rsp_claim_matrices(plm_video_t *self) {
+	if (plm_video_rsp_matrices_owner != self) {
+		rsp_mpeg1_set_quant_matrix(true, self->intra_quant_matrix);
+		rsp_mpeg1_set_quant_matrix(false, self->non_intra_quant_matrix);
+		plm_video_rsp_matrices_owner = self;
+	}
+}
+
 void plm_video_destroy(plm_video_t *self) {
+	if (plm_video_rsp_matrices_owner == self) {
+		plm_video_rsp_matrices_owner = NULL;
+	}
 	if (self->destroy_buffer_when_done) {
 		plm_buffer_destroy(self->buffer);
 	}
@@ -3417,6 +3438,7 @@ int plm_video_decode_sequence_header(plm_video_t *self) {
 		memcpy(self->non_intra_quant_matrix, PLM_VIDEO_NON_INTRA_QUANT_MATRIX, 64);
 	}
 	rsp_mpeg1_set_quant_matrix(false, self->non_intra_quant_matrix);
+	plm_video_rsp_matrices_owner = self;
 
 	self->mb_width = (self->width + 15) >> 4;
 	self->mb_height = (self->height + 15) >> 4;
@@ -3480,6 +3502,7 @@ void plm_video_init_frame(plm_video_t *self, plm_frame_t *frame, uint8_t *base) 
 }
 
 void plm_video_decode_slice(plm_video_t *self, int slice) {
+	plm_video_rsp_claim_matrices(self);
 	self->slice_begin = TRUE;
 	self->macroblock_address = (slice - 1) * self->mb_width - 1;
 
