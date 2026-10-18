@@ -174,6 +174,12 @@ int video_poll(video_t *v)
     return v->codec->poll(v);
 }
 
+int video_frames_waiting(video_t *v)
+{
+    assertf(v->codec->frames_waiting, "Codec %s can't count the frames waiting", v->codec->extension);
+    return v->codec->frames_waiting(v);
+}
+
 video_status_t video_next_frame(video_t *v, video_frame_t *frame)
 {
     video_status_t status;

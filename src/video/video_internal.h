@@ -41,6 +41,7 @@ typedef struct video_codec_s {
     void (*set_loop)(video_t *v, bool loop);            ///< Optional: see video_set_loop
     void (*frame_ref)(video_t *v, const video_frame_t *frame);      ///< Optional: see video_frame_ref
     void (*frame_unref)(video_t *v, const video_frame_t *frame);    ///< Optional: see video_frame_unref
+    int (*frames_waiting)(video_t *v);                              ///< Optional: see video_frames_waiting
 
     struct video_codec_s* next_codec;       ///< Next registered codec
 } video_codec_t;

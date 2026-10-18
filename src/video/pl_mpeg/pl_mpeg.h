@@ -734,6 +734,10 @@ plm_frame_t *plm_video_next_output(plm_video_t *self);
 // reference).
 void plm_video_release_output(plm_video_t *self, const plm_frame_t *frame);
 
+// How many decoded pictures are in the output queue, waiting to be taken
+// with plm_video_next_output(). The picture already taken isn't counted.
+int plm_video_output_waiting(plm_video_t *self);
+
 // Which of the decoder's picture buffers holds a picture it gave out (taken
 // or peeked): the identifier to reference it by, 0 .. buffers - 1.
 int plm_video_picture_id(plm_video_t *self, const plm_frame_t *frame);
@@ -3249,6 +3253,11 @@ plm_frame_t *plm_video_next_output(plm_video_t *self) {
 	self->out_q_count--;
 	self->out_current_in_use = 1;
 	return &self->out_current_frame;
+}
+
+int plm_video_output_waiting(plm_video_t *self) {
+	if (!self || self->buffered_pics <= 0) return 0;
+	return self->out_q_count;
 }
 
 void plm_video_release_output(plm_video_t *self, const plm_frame_t *frame) {

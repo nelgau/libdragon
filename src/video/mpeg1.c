@@ -362,6 +362,11 @@ static video_frame_t mpeg1_get_frame(video_t *v) {
 	};
 }
 
+static int mpeg1_frames_waiting(video_t *v) {
+	mpeg1_t *mp1 = (mpeg1_t *)v;
+	return plm_video_output_waiting(mp1->v);
+}
+
 static void mpeg1_close(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	if (mp1->f) {
@@ -404,4 +409,5 @@ video_codec_t mpeg1_codec = {
 	.set_loop = mpeg1_set_loop,
 	.frame_ref = mpeg1_frame_ref,
 	.frame_unref = mpeg1_frame_unref,
+	.frames_waiting = mpeg1_frames_waiting,
 };

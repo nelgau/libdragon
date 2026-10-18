@@ -414,6 +414,25 @@ LIBDRAGON_PREVIEW_API
 int video_poll(video_t *v);
 
 /**
+ * @brief How many decoded frames are waiting to be taken
+ * @preview
+ *
+ * The frames #video_poll has decoded ahead that #video_next_frame hasn't
+ * returned yet. The frame #video_next_frame last returned is not counted:
+ * it has been taken. So this is at most video_parms_t::buffered_pics, and at
+ * most one less while a taken frame is still held (the taken frame uses one
+ * of the buffered places until the next #video_next_frame). A rewind empties
+ * it.
+ *
+ * Asserts if the codec can't count them (only MPEG-1 can today).
+ *
+ * @param v             Handle to the video
+ * @return              The number of decoded frames waiting
+ */
+LIBDRAGON_PREVIEW_API
+int video_frames_waiting(video_t *v);
+
+/**
  * @brief Rewind the video to the beginning
  * @preview
  *
