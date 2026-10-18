@@ -24,10 +24,11 @@
  * which opens a video file and returns a handle to it. #video_get_info can be used
  * to query information about the video, such as width, height, framerate, etc.
  * 
- * To play the video, the main loop should call #video_next_frame any time
+ * To play the video, the main loop should call #video_take_frame any time
  * a new frame is needed (depending on the desired playback frequency).
  * It returns the frame as a #video_frame_t: the picture (a #yuv_frame_t)
- * and its position in the stream. You can then use the YUV library to
+ * and its position in the stream, yours until you release it
+ * (#video_frame_unref). You can then use the YUV library to
  * display it, either fullscreen, in a smaller portion, or even into an
  * offscreen surface to be used eg. like a texture.
  * 
@@ -110,7 +111,7 @@ typedef struct video_parms_s {
 } video_parms_t;
 
 /**
- * @brief Result of moving to the next frame (see #video_next_frame)
+ * @brief Result of taking the next frame (see #video_take_frame)
  */
 typedef enum {
     VIDEO_FRAME,        ///< A new frame was decoded (returned in the #video_frame_t)
@@ -136,7 +137,7 @@ typedef enum {
  * * #read may block. It is used only by #video_open_reader, which waits
  *   for the stream's header so that #video_get_info is valid right away.
  * * #try_read must not block. It is used while decoding: if it has no data
- *   yet, #video_next_frame returns #VIDEO_NEED_DATA and the
+ *   yet, #video_take_frame returns #VIDEO_NEED_DATA and the
  *   application tries again later.
  *
  * The video copies this structure, and calls #close (if set) at
@@ -240,7 +241,7 @@ video_t* video_open(const char *fn, const video_parms_t *parms);
  * video_reader_t::read, which may block), so #video_get_info is valid right
  * away.
  *
- * During playback, #video_next_frame returns
+ * During playback, #video_take_frame returns
  * #VIDEO_NEED_DATA when the reader had no data yet, and #VIDEO_END once the
  * reader reported the end of the stream and every frame was decoded.
  *
@@ -270,7 +271,7 @@ LIBDRAGON_PREVIEW_API
 video_info_t video_get_info(video_t *v);
 
 /**
- * @brief A decoded video frame (see #video_next_frame)
+ * @brief A decoded video frame (see #video_take_frame)
  */
 typedef struct video_frame_s {
     yuv_frame_t yuv;    ///< The picture (Y, U and V planes), for the YUV library
@@ -292,7 +293,7 @@ typedef struct video_frame_s {
     /**
      * @brief The video the frame came from (opaque)
      *
-     * Set when the frame is handed out (#video_next_frame), so that
+     * Set when the frame is handed out (#video_take_frame), so that
      * #video_frame_ref and #video_frame_unref need only the frame; don't
      * change it.
      */
@@ -300,24 +301,29 @@ typedef struct video_frame_s {
 } video_frame_t;
 
 /**
- * @brief Move to the next frame in the video stream
+ * @brief Take the next frame of the video stream
  * @preview
  *
- * Decodes the next frame (or takes it from the frames already decoded
- * ahead by #video_poll) and returns it in @p frame. If there is no frame,
- * the return value says why: the stream is finished (#VIDEO_END), or, for a
- * video opened with #video_open_reader, the reader has no data yet
- * (#VIDEO_NEED_DATA; try again later).
+ * Takes the next frame in display order: one already decoded ahead by
+ * #video_poll if one is waiting (#video_frames_waiting), otherwise it decodes
+ * it now. If there is no frame, the return value says why: the stream is
+ * finished (#VIDEO_END), or, for a video opened with #video_open_reader, the
+ * reader has no data yet (#VIDEO_NEED_DATA; try again later).
  *
- * The frame stays valid until the next call to #video_next_frame,
- * #video_rewind, #video_seek or #video_close: the decoder keeps the picture
- * until then, so it can be shown again (for example while paused). To keep
- * it longer (for example while the RDP is still drawing it), add a
- * reference with #video_frame_ref.
+ * The frame is yours: it comes with a reference (see #video_frame_ref), and
+ * its picture stays valid, its memory not reused by the decoder, until you
+ * drop that reference with #video_frame_unref. You can hold several frames
+ * at once (the one on screen and the next, say), and keep one across a
+ * #video_rewind. Every reference must be dropped before #video_close.
+ *
+ * A codec that can't count references (only MPEG-1 can today) keeps the last
+ * frame taken itself: it stays valid only until the next #video_take_frame,
+ * #video_rewind, #video_seek or #video_close, and #video_frame_unref does
+ * nothing for it.
  *
  * @param v             Handle to the video
  * @param frame         Filled in with the frame when the result is
- *                      #VIDEO_FRAME (can be NULL to skip a frame)
+ *                      #VIDEO_FRAME
  * @return              #VIDEO_FRAME, #VIDEO_NEED_DATA or #VIDEO_END
  *
  * @see #yuv_tex_blit
@@ -325,16 +331,16 @@ typedef struct video_frame_s {
  * @see #yuv_blitter_new
  */
 LIBDRAGON_PREVIEW_API
-video_status_t video_next_frame(video_t *v, video_frame_t *frame);
+video_status_t video_take_frame(video_t *v, video_frame_t *frame);
 
 /**
  * @brief Keep a frame's picture valid: add a reference to it
  * @preview
  *
  * Decoded pictures are reference counted, and the decoder reuses a
- * picture's memory only once nobody references it. #video_next_frame gives
- * the caller one reference, until the next call; this adds another, until
- * #video_frame_unref. Typically: drawing a frame queues commands that the
+ * picture's memory only once nobody references it. #video_take_frame gives
+ * the caller one reference; this adds another, until #video_frame_unref.
+ * Typically: drawing a frame queues commands that the
  * RDP runs later, so add a reference when queueing them and drop it when the
  * RDP has finished (the #rdpq_detach_cb callback), not before. Rewinding
  * doesn't free a referenced picture either: it stays intact until its last
@@ -345,18 +351,21 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame);
  * takes only the frame. Not every codec supports it; this asserts if it
  * can't.
  *
- * @param frame         A frame returned by #video_next_frame
+ * @param frame         A frame returned by #video_take_frame
  */
 LIBDRAGON_PREVIEW_API
 void video_frame_ref(const video_frame_t *frame);
 
 /**
- * @brief Drop a reference added with #video_frame_ref
+ * @brief Drop a reference to a frame
  * @preview
  *
- * Once nobody references the picture, the decoder may reuse its memory.
+ * The one #video_take_frame gave you, or one added with #video_frame_ref.
+ * Once nobody references the picture, the decoder may reuse its memory. For
+ * a codec that can't count references, this does nothing (see
+ * #video_take_frame).
  *
- * @param frame         The frame passed to #video_frame_ref
+ * @param frame         The frame
  */
 LIBDRAGON_PREVIEW_API
 void video_frame_unref(const video_frame_t *frame);
@@ -368,7 +377,7 @@ void video_frame_unref(const video_frame_t *frame);
  * With looping on, the decoder never reaches the end of the stream: when its
  * data runs out it goes back to the start and keeps decoding, so the
  * pictures decoded ahead (see #video_poll) carry on across the loop and the
- * first frames of the next pass are ready in time. #video_next_frame never
+ * first frames of the next pass are ready in time. #video_take_frame never
  * returns #VIDEO_END; the start of each pass is the frame whose
  * video_frame_t::index is 0.
  *
@@ -391,7 +400,7 @@ void video_set_loop(video_t *v, bool loop);
  * client needs to perform other tasks while the video is being decoded.
  * 
  * Usage of this function is totally optionally. A client can simply call
- * #video_next_frame repeatedly to decode the video stream frame by frame.
+ * #video_take_frame repeatedly to decode the video stream frame by frame.
  * It is however useful to make use of idle CPU time to buffer ahead.
  * Depending on the exact video encoding parameters and how the codec is
  * written, this function can decode multiple frames ahead of time.
@@ -402,8 +411,9 @@ void video_set_loop(video_t *v, bool loop);
  * 
  * The function returns 1 if the decoder did a chunk of work, or 0
  * if no work could be done. Typically, if poll returns 0, no more work
- * will be possible until the client calls #video_next_frame to move to the
- * next frame.
+ * will be possible until the client takes a frame (#video_take_frame) or
+ * releases one it holds (#video_frame_unref): the queue is full, or every
+ * picture buffer is in use.
  * 
  * @param v             Handle to the video
  * @return 0            Next frame is not yet ready
@@ -417,12 +427,10 @@ int video_poll(video_t *v);
  * @brief How many decoded frames are waiting to be taken
  * @preview
  *
- * The frames #video_poll has decoded ahead that #video_next_frame hasn't
- * returned yet. The frame #video_next_frame last returned is not counted:
- * it has been taken. So this is at most video_parms_t::buffered_pics, and at
- * most one less while a taken frame is still held (the taken frame uses one
- * of the buffered places until the next #video_next_frame). A rewind empties
- * it.
+ * The frames #video_poll has decoded ahead that haven't been taken yet
+ * (#video_take_frame): at most video_parms_t::buffered_pics. Frames already
+ * taken aren't counted, but while held they keep a picture buffer busy, so
+ * holding several leaves less room to decode ahead. A rewind empties it.
  *
  * Asserts if the codec can't count them (only MPEG-1 can today).
  *
@@ -450,7 +458,7 @@ void video_rewind(video_t *v);
  * 
  * In general, video codecs only allow fast seeking to keyframes. If the
  * specified frame index is not a keyframe, the videoplayer will seek to the closest
- * previous keyframe. In that case, the client will need to call #video_next_frame
+ * previous keyframe. In that case, the client will need to call #video_take_frame
  * repeatedly until the desired frame index is reached.
  * 
  * Seeking can be done instantly if the seek index has been generated at build

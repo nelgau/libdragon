@@ -136,7 +136,9 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
         if (exact) {
             // Decode frames until we reach the exact frame
             while (frame_idx < idx) {
-                if (video_next_frame(video, NULL) != VIDEO_FRAME) break;
+                video_frame_t skipped;
+                if (video_take_frame(video, &skipped) != VIDEO_FRAME) break;
+                video_frame_unref(&skipped);
                 frame_idx++;
             }
         }
@@ -204,7 +206,10 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
                 }
             }
 
-            if (video_next_frame(video, &frame) != VIDEO_FRAME) {
+            // Take the next frame; the one on screen is released once it's
+            // replaced (as before: it stays valid while paused).
+            video_frame_t next;
+            if (video_take_frame(video, &next) != VIDEO_FRAME) {
                 if (parms->loop) {
                     frame_idx = 0;
                     video_rewind(video);
@@ -216,6 +221,8 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
                     break;
                 }
             }
+            if (frame.video) video_frame_unref(&frame);
+            frame = next;
 
             if (subs) subtitles_next_frame(subs);
         }
@@ -258,6 +265,8 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
     }
 
     rspq_wait();
+    // The RDP is idle: the frame on screen can go back to its decoder.
+    if (frame.video) video_frame_unref(&frame);
 
     if (subrenderer) subrenderer_free(subrenderer);
     if (audio) {

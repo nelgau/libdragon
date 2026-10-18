@@ -180,9 +180,20 @@ int video_frames_waiting(video_t *v)
     return v->codec->frames_waiting(v);
 }
 
-video_status_t video_next_frame(video_t *v, video_frame_t *frame)
+video_status_t video_take_frame(video_t *v, video_frame_t *frame)
 {
+    assertf(frame, "video_take_frame: no frame to fill in");
     video_status_t status;
+    if (v->codec->take_frame) {
+        // The codec counts references: the frame comes with one, the caller's.
+        status = v->codec->take_frame(v, frame);
+        if (status == VIDEO_FRAME) {
+            frame->video = v;
+        }
+        return status;
+    }
+    // A codec that can't count references keeps the last frame itself, until
+    // the next take (see video.h).
     if (v->codec->next_frame_status) {
         status = v->codec->next_frame_status(v);
     } else {
@@ -195,17 +206,15 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame)
 
     // The codec owns the frame, index included: only it knows which picture
     // this is (it may have decoded ahead, rewound or looped since).
-    if (frame) {
-        *frame = v->codec->get_frame(v);
-        frame->video = v;
-    }
+    *frame = v->codec->get_frame(v);
+    frame->video = v;
     return VIDEO_FRAME;
 }
 
 void video_frame_ref(const video_frame_t *frame)
 {
     video_t *v = frame->video;
-    assertf(v, "video_frame_ref: not a frame from video_next_frame");
+    assertf(v, "video_frame_ref: not a frame from video_take_frame");
     assertf(v->codec->frame_ref, "Codec %s can't reference frames", v->codec->extension);
     v->codec->frame_ref(v, frame);
 }
@@ -213,8 +222,12 @@ void video_frame_ref(const video_frame_t *frame)
 void video_frame_unref(const video_frame_t *frame)
 {
     video_t *v = frame->video;
-    assertf(v, "video_frame_unref: not a frame from video_next_frame");
-    assertf(v->codec->frame_unref, "Codec %s can't reference frames", v->codec->extension);
+    assertf(v, "video_frame_unref: not a frame from video_take_frame");
+    // A codec that can't count references keeps the last frame taken itself
+    // (see video_take_frame): there's nothing to drop.
+    if (!v->codec->frame_unref) {
+        return;
+    }
     v->codec->frame_unref(v, frame);
 }
 

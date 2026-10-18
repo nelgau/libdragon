@@ -21,7 +21,6 @@ typedef struct mpeg1_s {
 	video_t video;
 	plm_buffer_t *buf;
 	plm_video_t *v;
-	plm_frame_t *f;
 	int buffered_pics;
 	bool has_reader;        ///< Opened with video_open_reader
 	bool reader_ended;      ///< The reader returned VIDEO_READ_END
@@ -302,7 +301,7 @@ static int mpeg1_poll(video_t *v) {
 		return 0;
 	// Otherwise the bitstream buffer may be full of bytes already decoded:
 	// make room, and try once more. Taking a frame makes room too
-	// (mpeg1_next_frame_status), but decoding ahead with no frame taken, as
+	// (mpeg1_take_frame), but decoding ahead with no frame taken, as
 	// a player does while getting ready to start, mustn't stall on it. Only
 	// when stuck: making room copies every byte not yet read, too costly for
 	// every step.
@@ -313,27 +312,38 @@ static int mpeg1_poll(video_t *v) {
 	return plm_video_poll(mp1->v) ? 1 : 0;
 }
 
-static video_status_t mpeg1_next_frame_status(video_t *v) {
-	mpeg1_t *mp1 = (mpeg1_t *)v;
+// The frame a pl_mpeg picture becomes: planes, index, and which picture it is.
+static video_frame_t mpeg1_frame_of(mpeg1_t *mp1, const plm_frame_t *picture) {
+	surface_t yp  = surface_make_linear(picture->y.data,  FMT_I8, picture->width,   picture->height);
+	surface_t cbp = surface_make_linear(picture->cb.data, FMT_I8, picture->width/2, picture->height/2);
+	surface_t crp = surface_make_linear(picture->cr.data, FMT_I8, picture->width/2, picture->height/2);
+	// pl_mpeg tagged the picture with its index when it entered the output
+	// queue, so pictures decoded ahead keep the right index.
+	return (video_frame_t){
+		.yuv = { .y = yp, .u = cbp, .v = crp },
+		.index = picture->index,
+		.picture_id = plm_video_picture_id(mp1->v, picture),
+	};
+}
 
-	// Release previous frame (if any). Frames extracted from the output queue stay
-	// locked until explicitly released.
-	if (mp1->f) {
-		plm_video_release_output(mp1->v, (plm_frame_t *)mp1->f);
-		mp1->f = NULL;
-	}
+static video_status_t mpeg1_take_frame(video_t *v, video_frame_t *frame) {
+	mpeg1_t *mp1 = (mpeg1_t *)v;
 
 	// Make room if the buffer is full (mpeg1_make_room). Retrying after
 	// VIDEO_NEED_DATA is cheap: the scan resumes where it stopped, so with no
 	// new bytes it only asks the reader once.
 	mpeg1_make_room(mp1);
 
+	// The picture comes with the queue's reference, which becomes the
+	// caller's (video_frame_unref drops it).
+	plm_frame_t picture;
 	PROFILE_START(PS_MPEG);
-	mp1->f = plm_video_decode(mp1->v);
+	int taken = plm_video_take_output(mp1->v, &picture);
 	PROFILE_STOP(PS_MPEG);
-
-	if (mp1->f)
+	if (taken) {
+		*frame = mpeg1_frame_of(mp1, &picture);
 		return VIDEO_FRAME;
+	}
 
 	// No frame. In file mode, or once the reader reported the end, that's the
 	// end of the stream.
@@ -352,10 +362,7 @@ static void mpeg1_set_loop(video_t *v, bool loop) {
 
 static void mpeg1_rewind(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
-	if (mp1->f) {
-		plm_video_release_output(mp1->v, (plm_frame_t *)mp1->f);
-		mp1->f = NULL;
-	}
+	// Frames already taken are their takers': a rewind leaves them intact.
 	// Reader mode: the decoder keeps the header it already decoded, and skips
 	// it when it comes around again.
 	if (mp1->has_reader) {
@@ -366,7 +373,7 @@ static void mpeg1_rewind(video_t *v) {
 	plm_video_rewind(mp1->v);
 }
 
-// A frame's picture_id is the pl_mpeg picture it came from (mpeg1_get_frame).
+// A frame's picture_id is the pl_mpeg picture it came from (mpeg1_frame_of).
 static void mpeg1_frame_ref(video_t *v, const video_frame_t *frame) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	plm_video_ref_picture(mp1->v, frame->picture_id);
@@ -377,21 +384,6 @@ static void mpeg1_frame_unref(video_t *v, const video_frame_t *frame) {
 	plm_video_unref_picture(mp1->v, frame->picture_id);
 }
 
-static video_frame_t mpeg1_get_frame(video_t *v) {
-	mpeg1_t *mp1 = (mpeg1_t *)v;
-	plm_frame_t *frame = (plm_frame_t*)mp1->f;
-	surface_t yp  = surface_make_linear(frame->y.data,  FMT_I8, frame->width,   frame->height);
-	surface_t cbp = surface_make_linear(frame->cb.data, FMT_I8, frame->width/2, frame->height/2);
-	surface_t crp = surface_make_linear(frame->cr.data, FMT_I8, frame->width/2, frame->height/2);
-	// pl_mpeg tagged the picture with its index when it entered the output
-	// queue, so pictures decoded ahead keep the right index.
-	return (video_frame_t){
-		.yuv = { .y = yp, .u = cbp, .v = crp },
-		.index = frame->index,
-		.picture_id = plm_video_picture_id(mp1->v, frame),
-	};
-}
-
 static int mpeg1_frames_waiting(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	return plm_video_output_waiting(mp1->v);
@@ -399,10 +391,8 @@ static int mpeg1_frames_waiting(video_t *v) {
 
 static void mpeg1_close(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
-	if (mp1->f) {
-		plm_video_release_output(mp1->v, (plm_frame_t *)mp1->f);
-		mp1->f = NULL;
-	}
+	// Every frame taken must have been released by now (plm_video_destroy
+	// asserts that no picture is still referenced).
 	plm_video_destroy(mp1->v);
 	if (mp1->has_reader && mp1->reader.close)
 		mp1->reader.close(mp1->reader.ctx);
@@ -432,8 +422,7 @@ video_codec_t mpeg1_codec = {
 	.open = mpeg1_open,
 	.close = mpeg1_close,
 	.poll = mpeg1_poll,
-	.next_frame_status = mpeg1_next_frame_status,
-	.get_frame = mpeg1_get_frame,
+	.take_frame = mpeg1_take_frame,
 	.rewind = mpeg1_rewind,
 	.open_reader = mpeg1_open_reader,
 	.set_loop = mpeg1_set_loop,

@@ -90,7 +90,7 @@ void video_sync_reset(video_sync_t *s, int frame_idx);
 /**
  * @brief Decide what to do next to keep video in sync with master time.
  *
- * The function is pure decision-making: it does not call #video_next_frame or
+ * The function is pure decision-making: it does not call #video_take_frame or
  * #video_seek by itself. The caller should execute the returned action.
  *
  * @param s               Sync helper

@@ -734,6 +734,14 @@ plm_frame_t *plm_video_next_output(plm_video_t *self);
 // reference).
 void plm_video_release_output(plm_video_t *self, const plm_frame_t *frame);
 
+// Take the next picture in presentation order, decoding if none is waiting
+// (as plm_video_decode does), into *out: the queue's reference becomes the
+// caller's, who drops it with plm_video_unref_picture(). Unlike
+// plm_video_next_output, any number may be held at once. Returns 0, with
+// nothing taken, if no picture could be decoded (more input needed, or the
+// end).
+int plm_video_take_output(plm_video_t *self, plm_frame_t *out);
+
 // How many decoded pictures are in the output queue, waiting to be taken
 // with plm_video_next_output(). The picture already taken isn't counted.
 int plm_video_output_waiting(plm_video_t *self);
@@ -3253,6 +3261,18 @@ plm_frame_t *plm_video_next_output(plm_video_t *self) {
 	self->out_q_count--;
 	self->out_current_in_use = 1;
 	return &self->out_current_frame;
+}
+
+int plm_video_take_output(plm_video_t *self, plm_frame_t *out) {
+	if (!self || self->buffered_pics <= 0) return 0;
+	while (self->out_q_count == 0) {
+		if (!plm_video_poll(self)) return 0;
+	}
+	// The queue's reference becomes the caller's: no count changes.
+	*out = self->out_queue[self->out_q_head];
+	self->out_q_head = (self->out_q_head + 1) % self->buffered_pics;
+	self->out_q_count--;
+	return 1;
 }
 
 int plm_video_output_waiting(plm_video_t *self) {
