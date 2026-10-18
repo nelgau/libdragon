@@ -191,18 +191,23 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame)
     // this is (it may have decoded ahead, rewound or looped since).
     if (frame) {
         *frame = v->codec->get_frame(v);
+        frame->video = v;
     }
     return VIDEO_FRAME;
 }
 
-void video_frame_ref(video_t *v, const video_frame_t *frame)
+void video_frame_ref(const video_frame_t *frame)
 {
+    video_t *v = frame->video;
+    assertf(v, "video_frame_ref: not a frame from video_next_frame");
     assertf(v->codec->frame_ref, "Codec %s can't reference frames", v->codec->extension);
     v->codec->frame_ref(v, frame);
 }
 
-void video_frame_unref(video_t *v, const video_frame_t *frame)
+void video_frame_unref(const video_frame_t *frame)
 {
+    video_t *v = frame->video;
+    assertf(v, "video_frame_unref: not a frame from video_next_frame");
     assertf(v->codec->frame_unref, "Codec %s can't reference frames", v->codec->extension);
     v->codec->frame_unref(v, frame);
 }

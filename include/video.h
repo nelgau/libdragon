@@ -289,6 +289,14 @@ typedef struct video_frame_s {
      * #video_frame_unref to find the picture by; don't change it.
      */
     int picture_id;
+    /**
+     * @brief The video the frame came from (opaque)
+     *
+     * Set when the frame is handed out (#video_next_frame), so that
+     * #video_frame_ref and #video_frame_unref need only the frame; don't
+     * change it.
+     */
+    video_t *video;
 } video_frame_t;
 
 /**
@@ -331,15 +339,16 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame);
  * RDP has finished (the #rdpq_detach_cb callback), not before. Rewinding
  * doesn't free a referenced picture either: it stays intact until its last
  * reference is dropped. Every reference must be dropped before
- * #video_close.
+ * #video_close (it asserts): a referenced frame must not outlive its video.
  *
- * Not every codec supports it; this asserts if it can't.
+ * The frame knows which video it came from (video_frame_t::video), so this
+ * takes only the frame. Not every codec supports it; this asserts if it
+ * can't.
  *
- * @param v             Handle to the video
  * @param frame         A frame returned by #video_next_frame
  */
 LIBDRAGON_PREVIEW_API
-void video_frame_ref(video_t *v, const video_frame_t *frame);
+void video_frame_ref(const video_frame_t *frame);
 
 /**
  * @brief Drop a reference added with #video_frame_ref
@@ -347,11 +356,10 @@ void video_frame_ref(video_t *v, const video_frame_t *frame);
  *
  * Once nobody references the picture, the decoder may reuse its memory.
  *
- * @param v             Handle to the video
  * @param frame         The frame passed to #video_frame_ref
  */
 LIBDRAGON_PREVIEW_API
-void video_frame_unref(video_t *v, const video_frame_t *frame);
+void video_frame_unref(const video_frame_t *frame);
 
 /**
  * @brief Make the video loop

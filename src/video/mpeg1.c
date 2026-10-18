@@ -336,8 +336,6 @@ static void mpeg1_rewind(video_t *v) {
 	plm_video_rewind(mp1->v);
 }
 
-// The decoder knows its pictures by their Y plane (pl_mpeg finds the buffer
-// from it), so that's all a frame needs to name its picture.
 // A frame's picture_id is the pl_mpeg picture it came from (mpeg1_get_frame).
 static void mpeg1_frame_ref(video_t *v, const video_frame_t *frame) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
