@@ -266,11 +266,33 @@ static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parm
 	return &mp1->video;
 }
 
+// Reader mode: while pl_mpeg scans ahead for the next picture it doesn't
+// let the load callback discard consumed bytes. If that left the buffer
+// full, make room now (everything before the read position is consumed).
+// Returns true if it made room.
+static bool mpeg1_make_room(mpeg1_t *mp1) {
+	plm_buffer_t *b = mp1->buf;
+	if (!mp1->has_reader || b->length < b->capacity)
+		return false;
+	plm_buffer_discard_read_bytes(b);
+	return true;
+}
+
 static int mpeg1_poll(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	if (mp1->buffered_pics <= 0)
 		return 0;
-	return plm_video_poll(mp1->v) ? 1 : 0;
+	if (plm_video_poll(mp1->v))
+		return 1;
+	// Stuck, with room in the picture queue: the buffer may be full. Make
+	// room and try again. Taking a frame does this too
+	// (mpeg1_next_frame_status), but decoding ahead with no frame taken, as
+	// a player does while getting ready to start, must not stall on it. Only
+	// when stuck: making room copies everything not yet read, too costly for
+	// every step.
+	if (!plm_video_out_full(mp1->v) && mpeg1_make_room(mp1) && plm_video_poll(mp1->v))
+		return 1;
+	return 0;
 }
 
 static video_status_t mpeg1_next_frame_status(video_t *v) {
@@ -283,14 +305,10 @@ static video_status_t mpeg1_next_frame_status(video_t *v) {
 		mp1->f = NULL;
 	}
 
-	// Reader mode: while pl_mpeg scans ahead for the next picture it doesn't
-	// let the load callback discard consumed bytes. If that left the buffer
-	// full, make room now (everything before the read position is consumed).
-	// Retrying after VIDEO_NEED_DATA is cheap: the scan resumes where it
-	// stopped, so with no new bytes it only asks the reader once.
-	plm_buffer_t *b = mp1->buf;
-	if (mp1->has_reader && b->length == b->capacity)
-		plm_buffer_discard_read_bytes(b);
+	// Make room if the buffer is full (mpeg1_make_room). Retrying after
+	// VIDEO_NEED_DATA is cheap: the scan resumes where it stopped, so with no
+	// new bytes it only asks the reader once.
+	mpeg1_make_room(mp1);
 
 	PROFILE_START(PS_MPEG);
 	mp1->f = plm_video_decode(mp1->v);
@@ -307,6 +325,7 @@ static video_status_t mpeg1_next_frame_status(video_t *v) {
 	// Reader mode: the decoder only decodes a picture once the next picture's
 	// start code is in the buffer. If the unread bytes already fill the whole
 	// buffer, nothing more fits and it would wait forever.
+	plm_buffer_t *b = mp1->buf;
 	size_t unread = b->length - (b->bit_index >> 3);
 	assertf(unread < b->capacity,
 		"MPEG1 reader buffer (%d bytes) is too small for a compressed picture; "
