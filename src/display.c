@@ -139,19 +139,34 @@ static inline int buffer_next(int idx) {
     return idx;
 }
 
+/** @brief Accumulator for the FPS limit (#vblank_shows_frame) */
+static float frame_skip_accum = 0.0f;
+
 /** 
- * @brief Check if we should use this vblank interrupt or not, depending on fps limit 
+ * @brief Check if a vblank can show a new frame
  * 
+ * In full interlace mode, a frame is shown only at the start of the first
+ * field (field 0), so that both of its fields are displayed.
+ *
  * FPS limit is implemented simply by pretending the hardware is slower at generating
  * video interrupts, which in turn means skipping an interrupt every now and then
- * to keep the frame rate within the desired limits.
+ * to keep the frame rate within the desired limits. The limit advances
+ * \p accum only at vblanks the interlace mode lets through.
+ *
+ * #__display_callback calls it on #frame_skip_accum at every vblank;
+ * #display_get_output_latency calls it on a copy, to look ahead.
+ *
+ * @param field     The field the vblank starts (0 or 1)
+ * @param accum     The FPS limit's accumulator, advanced
+ * @return          True if the vblank can show a frame
  */
-static bool fps_limit_ok(void)
+static bool vblank_shows_frame(int field, float *accum)
 {
-    static float frame_skip_accum = 0.0f;
-    frame_skip_accum += frame_skip;
-    if (frame_skip_accum < 0.0f) return false;
-    frame_skip_accum -= 1.0f;
+    if (__interlace_mode == INTERLACE_FULL && field)
+        return false;
+    *accum += frame_skip;
+    if (*accum < 0.0f) return false;
+    *accum -= 1.0f;
     return true;
 }
 
@@ -212,7 +227,7 @@ static void __display_callback(void *arg)
 
     /* Show frames in strict FIFO order (order of display_get/display_try_get).
        If full interlace mode is selected then don't update the buffer until two fields were displayed. */
-    if (!(__interlace_mode == INTERLACE_FULL && field) && fps_limit_ok()) {
+    if (vblank_shows_frame(field, &frame_skip_accum)) {
         bool newframe = false;
         if (display_queue_count > 0) {
             int next = display_queue[display_queue_head];
@@ -688,6 +703,42 @@ float display_get_refresh_rate(void)
 float display_get_delta_time(void)
 {
     return delta_time;
+}
+
+float display_get_output_latency(void)
+{
+    assertf(__num_buffers != 0, "Display not initialized.");
+
+    disable_interrupts();
+    int field;
+    int line = vi_get_scanline(&field);
+    int ahead = display_queue_count;
+    float accum = frame_skip_accum;
+    enable_interrupts();
+
+    /* The time to the next vblank: the half-lines left to the vblank line,
+       as a share of the field. At the vblank line itself, it's the one
+       after. */
+    int lines = (vi_read(VI_V_TOTAL) & 0x3FF) + 1;
+    int to_vblank = (VI_V_CURRENT_VBLANK - line + lines) % lines;
+    if (to_vblank == 0)
+        to_vblank = lines;
+    float latency = refresh_period * to_vblank / lines;
+
+    /* The vblanks from the next one on, as __display_callback will see them
+       (each starts the other field): one that can show a frame shows the
+       head of the queue, so the frames ahead go first, one per such vblank,
+       and the next one after them shows the frame obtained next. */
+    int vblank_field = field ^ 1;
+    while (true) {
+        if (vblank_shows_frame(vblank_field, &accum)) {
+            if (ahead == 0)
+                return latency;
+            ahead--;
+        }
+        latency += refresh_period;
+        vblank_field ^= 1;
+    }
 }
 
 void display_set_fps_limit(float fps)

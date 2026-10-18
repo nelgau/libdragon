@@ -466,6 +466,35 @@ LIBDRAGON_PREVIEW_API
 float display_get_delta_time(void);
 
 /**
+ * @brief Return how long until a frame obtained now would appear on screen
+ * @preview
+ *
+ * This is the time from now to the vblank at which a frame obtained next
+ * (#display_get or #display_try_get) and shown at once (#display_show)
+ * starts being scanned out. Frames are shown in the order they were
+ * obtained, one per vblank, so it is the time to the next vblank that can
+ * show a frame, plus one such vblank for every frame obtained before it and
+ * not on screen yet, whether still being drawn or already shown and
+ * waiting. Vblanks that can't show a frame are skipped as the display skips
+ * them: the second field in #INTERLACE_FULL mode, and those dropped by
+ * #display_set_fps_limit.
+ *
+ * It assumes each frame ahead is shown in time for its vblank (a frame
+ * still being drawn at its vblank delays the frames behind it by a vblank),
+ * and it doesn't know how long the caller takes to draw. Call it before
+ * obtaining the framebuffer: one already obtained counts as a frame ahead.
+ * Call it with interrupts enabled: a vblank reached while they are disabled
+ * hasn't been served yet, and the answer would be a vblank late.
+ *
+ * Together with #audio_get_output_latency, this lets a program show a
+ * frame when the audio it belongs to is heard.
+ *
+ * @return Time in seconds until a frame obtained and shown now appears
+ */
+LIBDRAGON_PREVIEW_API
+float display_get_output_latency(void);
+
+/**
  * @brief Configure a limit for the frames per second
  * @preview
  *
