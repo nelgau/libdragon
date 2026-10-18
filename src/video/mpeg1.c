@@ -336,6 +336,26 @@ static void mpeg1_rewind(video_t *v) {
 	plm_video_rewind(mp1->v);
 }
 
+// The decoder knows its pictures by their Y plane (pl_mpeg finds the buffer
+// from it), so that's all a frame needs to name its picture.
+static plm_frame_t mpeg1_picture_of(const video_frame_t *frame) {
+	plm_frame_t f = {0};
+	f.y.data = frame->yuv.y.buffer;
+	return f;
+}
+
+static void mpeg1_frame_ref(video_t *v, const video_frame_t *frame) {
+	mpeg1_t *mp1 = (mpeg1_t *)v;
+	plm_frame_t f = mpeg1_picture_of(frame);
+	plm_video_ref_frame(mp1->v, &f);
+}
+
+static void mpeg1_frame_unref(video_t *v, const video_frame_t *frame) {
+	mpeg1_t *mp1 = (mpeg1_t *)v;
+	plm_frame_t f = mpeg1_picture_of(frame);
+	plm_video_unref_frame(mp1->v, &f);
+}
+
 static video_frame_t mpeg1_get_frame(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
 	plm_frame_t *frame = (plm_frame_t*)mp1->f;
@@ -390,4 +410,6 @@ video_codec_t mpeg1_codec = {
 	.rewind = mpeg1_rewind,
 	.open_reader = mpeg1_open_reader,
 	.set_loop = mpeg1_set_loop,
+	.frame_ref = mpeg1_frame_ref,
+	.frame_unref = mpeg1_frame_unref,
 };

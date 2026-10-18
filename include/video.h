@@ -296,7 +296,9 @@ typedef struct video_frame_s {
  *
  * The frame stays valid until the next call to #video_next_frame,
  * #video_rewind, #video_seek or #video_close: the decoder keeps the picture
- * until then, so it can be shown again (for example while paused).
+ * until then, so it can be shown again (for example while paused). To keep
+ * it longer (for example while the RDP is still drawing it), add a
+ * reference with #video_frame_ref.
  *
  * @param v             Handle to the video
  * @param frame         Filled in with the frame when the result is
@@ -309,6 +311,40 @@ typedef struct video_frame_s {
  */
 LIBDRAGON_PREVIEW_API
 video_status_t video_next_frame(video_t *v, video_frame_t *frame);
+
+/**
+ * @brief Keep a frame's picture valid: add a reference to it
+ * @preview
+ *
+ * Decoded pictures are reference counted, and the decoder reuses a
+ * picture's memory only once nobody references it. #video_next_frame gives
+ * the caller one reference, until the next call; this adds another, until
+ * #video_frame_unref. Typically: drawing a frame queues commands that the
+ * RDP runs later, so add a reference when queueing them and drop it when the
+ * RDP has finished (the #rdpq_detach_cb callback), not before. Rewinding
+ * doesn't free a referenced picture either: it stays intact until its last
+ * reference is dropped. Every reference must be dropped before
+ * #video_close.
+ *
+ * Not every codec supports it; this asserts if it can't.
+ *
+ * @param v             Handle to the video
+ * @param frame         A frame returned by #video_next_frame
+ */
+LIBDRAGON_PREVIEW_API
+void video_frame_ref(video_t *v, const video_frame_t *frame);
+
+/**
+ * @brief Drop a reference added with #video_frame_ref
+ * @preview
+ *
+ * Once nobody references the picture, the decoder may reuse its memory.
+ *
+ * @param v             Handle to the video
+ * @param frame         The frame passed to #video_frame_ref
+ */
+LIBDRAGON_PREVIEW_API
+void video_frame_unref(video_t *v, const video_frame_t *frame);
 
 /**
  * @brief Make the video loop

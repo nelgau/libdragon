@@ -195,6 +195,18 @@ video_status_t video_next_frame(video_t *v, video_frame_t *frame)
     return VIDEO_FRAME;
 }
 
+void video_frame_ref(video_t *v, const video_frame_t *frame)
+{
+    assertf(v->codec->frame_ref, "Codec %s can't reference frames", v->codec->extension);
+    v->codec->frame_ref(v, frame);
+}
+
+void video_frame_unref(video_t *v, const video_frame_t *frame)
+{
+    assertf(v->codec->frame_unref, "Codec %s can't reference frames", v->codec->extension);
+    v->codec->frame_unref(v, frame);
+}
+
 void video_set_loop(video_t *v, bool loop)
 {
     assertf(v->codec->set_loop, "Codec %s can't loop", v->codec->extension);
