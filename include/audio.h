@@ -199,6 +199,28 @@ int audio_get_num_buffers(void);
 LIBDRAGON_PREVIEW_API
 int audio_get_queued_buffers(void);
 
+/**
+ * @brief Return the number of samples handed to the audio output and not
+ *        played yet
+ * @preview
+ *
+ * These are the samples that will come out of the DAC before any sample
+ * written now: the rest of the buffer the AI is playing, the buffer queued
+ * behind it in the AI, and the full buffers waiting to be sent to the AI.
+ * Divided by #audio_get_frequency, it is the output latency in seconds; a
+ * sample's position minus this count is the sample being heard.
+ *
+ * It is read with interrupts disabled, from the AI's status and length
+ * registers, so a buffer the AI has finished since its last interrupt was
+ * served is not counted (it is counted as the AI interrupt handler would
+ * count it). The value is a snapshot.
+ *
+ * @return Number of stereo samples, at #audio_get_frequency, not played
+ *         yet; zero if the audio subsystem is not initialized
+ */
+LIBDRAGON_PREVIEW_API
+int audio_get_unplayed_samples(void);
+
 
 /**
  * @brief Start writing to the first free internal buffer.

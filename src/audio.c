@@ -533,3 +533,36 @@ int audio_get_queued_buffers()
     }
     return count;
 }
+
+int audio_get_unplayed_samples(void)
+{
+    if (!pool)
+        return 0;
+
+    disable_interrupts();
+    /* Status first: the length read right after belongs to the state it
+       reports. */
+    uint32_t status = AI_regs->status;
+    uint32_t length = AI_regs->length & 0x3FFFF;
+    /* The buffers in the AI: the ones handed to its DMA, less those it has
+       finished since audio_callback last ran (counted as audio_callback
+       counts them). */
+    int in_ai = playing_queue;
+    if (in_ai > 1 && !(status & AI_STATUS_FULL))
+        in_ai--;
+    if (in_ai > 0 && !(status & AI_STATUS_BUSY))
+        in_ai--;
+    /* Full buffers not handed to the AI yet (none when a fill callback
+       fills each buffer as it is handed over). */
+    int waiting = audio_get_queued_buffers() - playing_queue;
+    if (waiting < 0)
+        waiting = 0;
+    enable_interrupts();
+
+    /* The one playing has length bytes left (stereo, 16 bits); every other
+       buffer plays in full, as audio_callback hands it to the DMA. */
+    int buffer_samples = ((_buf_size * 2 * 2) & ~7) / 4;
+    int playing = in_ai > 0 ? length / 4 : 0;
+    int behind = in_ai > 1 ? in_ai - 1 : 0;
+    return playing + (behind + waiting) * buffer_samples;
+}
