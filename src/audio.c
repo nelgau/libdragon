@@ -534,10 +534,10 @@ int audio_get_queued_buffers()
     return count;
 }
 
-int audio_get_unplayed_samples(void)
+float audio_get_output_latency(void)
 {
     if (!pool)
-        return 0;
+        return 0.0f;
 
     disable_interrupts();
     /* Status first: the length read right after belongs to the state it
@@ -564,5 +564,6 @@ int audio_get_unplayed_samples(void)
     int buffer_samples = ((_buf_size * 2 * 2) & ~7) / 4;
     int playing = in_ai > 0 ? length / 4 : 0;
     int behind = in_ai > 1 ? in_ai - 1 : 0;
-    return playing + (behind + waiting) * buffer_samples;
+    int unplayed = playing + (behind + waiting) * buffer_samples;
+    return (float)unplayed / (float)_frequency;
 }
