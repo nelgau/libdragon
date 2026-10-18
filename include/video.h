@@ -282,6 +282,13 @@ typedef struct video_frame_s {
      * index / video_info_t::framerate.
      */
     int index;
+    /**
+     * @brief Which of the decoder's pictures this is (opaque)
+     *
+     * Set by the codec when it hands the frame out, for #video_frame_ref and
+     * #video_frame_unref to find the picture by; don't change it.
+     */
+    int picture_id;
 } video_frame_t;
 
 /**

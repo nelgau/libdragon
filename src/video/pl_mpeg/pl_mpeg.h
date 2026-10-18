@@ -716,7 +716,7 @@ int plm_video_poll(plm_video_t *self);
 // Pictures are reference counted. A picture's buffer is reused for decoding
 // only once nobody references it: the output queue references each picture
 // it holds, the consumer the picture it took (plm_video_next_output), and
-// anyone else may add references (plm_video_ref_frame), for example while
+// anyone else may add references (plm_video_ref_picture), for example while
 // the RDP draws it. Rewinding drops the queue's and the consumer's
 // references, not the others: a picture referenced elsewhere stays intact.
 
@@ -734,10 +734,14 @@ plm_frame_t *plm_video_next_output(plm_video_t *self);
 // reference).
 void plm_video_release_output(plm_video_t *self, const plm_frame_t *frame);
 
-// Add or drop a reference to a picture the decoder gave out (taken or
-// peeked). While referenced, its buffer isn't reused, across a rewind too.
-void plm_video_ref_frame(plm_video_t *self, const plm_frame_t *frame);
-void plm_video_unref_frame(plm_video_t *self, const plm_frame_t *frame);
+// Which of the decoder's picture buffers holds a picture it gave out (taken
+// or peeked): the identifier to reference it by, 0 .. buffers - 1.
+int plm_video_picture_id(plm_video_t *self, const plm_frame_t *frame);
+
+// Add or drop a reference to a picture, by its identifier. While referenced,
+// its buffer isn't reused, across a rewind too.
+void plm_video_ref_picture(plm_video_t *self, int id);
+void plm_video_unref_picture(plm_video_t *self, int id);
 
 
 // Get the current internal time in seconds.
@@ -3154,29 +3158,36 @@ static inline void plm_video_finish_picture(plm_video_t *self, plm_frame_t frame
 	}
 }
 
-void plm_video_ref_frame(plm_video_t *self, const plm_frame_t *frame) {
-	int idx = plm_video_buf_index_from_y(self, frame->y.data);
-	assertf(idx >= 0 && self->frame_refs, "MPEG1: not one of this decoder's pictures");
-	assertf(self->frame_refs[idx] < 255, "MPEG1: too many references to one picture");
-	self->frame_refs[idx]++;
+int plm_video_picture_id(plm_video_t *self, const plm_frame_t *frame) {
+	int id = plm_video_buf_index_from_y(self, frame->y.data);
+	assertf(id >= 0, "MPEG1: not one of this decoder's pictures");
+	return id;
 }
 
-void plm_video_unref_frame(plm_video_t *self, const plm_frame_t *frame) {
-	int idx = plm_video_buf_index_from_y(self, frame->y.data);
-	assertf(idx >= 0 && self->frame_refs, "MPEG1: not one of this decoder's pictures");
-	assertf(self->frame_refs[idx] > 0, "MPEG1: dropping a reference to a picture nobody references");
-	self->frame_refs[idx]--;
+void plm_video_ref_picture(plm_video_t *self, int id) {
+	assertf(id >= 0 && id < self->num_frame_buffers && self->frame_refs,
+		"MPEG1: not one of this decoder's pictures");
+	assertf(self->frame_refs[id] < 255, "MPEG1: too many references to one picture");
+	self->frame_refs[id]++;
+}
+
+void plm_video_unref_picture(plm_video_t *self, int id) {
+	assertf(id >= 0 && id < self->num_frame_buffers && self->frame_refs,
+		"MPEG1: not one of this decoder's pictures");
+	assertf(self->frame_refs[id] > 0, "MPEG1: dropping a reference to a picture nobody references");
+	self->frame_refs[id]--;
 }
 
 // The queue lets go of every picture it holds, and the consumer of the one it
 // took (after a rewind or at destroy, nobody will take or release them).
 static void plm_video_drop_output(plm_video_t *self) {
 	for (int i = 0; i < self->out_q_count; i++) {
-		plm_video_unref_frame(self, &self->out_queue[(self->out_q_head + i) % self->buffered_pics]);
+		plm_video_unref_picture(self, plm_video_picture_id(self,
+			&self->out_queue[(self->out_q_head + i) % self->buffered_pics]));
 	}
 	self->out_q_head = self->out_q_tail = self->out_q_count = 0;
 	if (self->out_current_in_use) {
-		plm_video_unref_frame(self, &self->out_current_frame);
+		plm_video_unref_picture(self, plm_video_picture_id(self, &self->out_current_frame));
 		self->out_current_in_use = 0;
 	}
 }
@@ -3211,7 +3222,7 @@ static void plm_video_enqueue_output(plm_video_t *self, const plm_frame_t *frame
 	self->out_queue[self->out_q_tail] = *frame;
 	self->out_q_tail = (self->out_q_tail + 1) % self->buffered_pics;
 	self->out_q_count++;
-	plm_video_ref_frame(self, frame);   // the queue's reference
+	plm_video_ref_picture(self, plm_video_picture_id(self, frame));   // the queue's reference
 }
 
 static inline void plm_video_emit_output(plm_video_t *self, const plm_frame_t *frame) {
@@ -3245,7 +3256,7 @@ void plm_video_release_output(plm_video_t *self, const plm_frame_t *frame) {
 	// We currently support releasing only the last extracted output frame.
 	ASSERT(self->out_current_in_use);
 	ASSERT(frame == &self->out_current_frame);
-	plm_video_unref_frame(self, frame);
+	plm_video_unref_picture(self, plm_video_picture_id(self, frame));
 	self->out_current_in_use = 0;
 }
 
