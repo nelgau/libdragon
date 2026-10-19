@@ -3002,6 +3002,24 @@ void plm_video_rewind(plm_video_t *self) {
 	self->has_reference_frame = FALSE;
 	self->start_code = -1;
 
+	// libdragon: a picture still being decoded (the poll decodes a slice at a
+	// time) is abandoned, and the reference frames go back to how they were
+	// before it began: an I or P picture's start moved frame_backward into
+	// frame_forward, and a B picture's start pointed frame_current at a free
+	// buffer. Left half-moved, two of them would name the same buffer, and a
+	// later picture would be decoded over its own reference.
+	if (self->poll_state == PLM_POLL_STATE_IN_PICTURE) {
+		if (self->poll_saved_current_valid) {
+			self->frame_current = self->poll_saved_current;
+		}
+		else if (
+			self->picture_type == PLM_VIDEO_PICTURE_TYPE_INTRA ||
+			self->picture_type == PLM_VIDEO_PICTURE_TYPE_PREDICTIVE
+		) {
+			self->frame_forward = self->poll_frame_temp;
+		}
+	}
+
 	// Reset libdragon extension state. The queue and the consumer let go of
 	// their pictures; a picture referenced elsewhere keeps its buffer, which
 	// decoding then avoids like any referenced one.
@@ -3438,9 +3456,11 @@ int plm_video_poll(plm_video_t *self) {
 		}
 
 		if (out && !plm_video_out_full(self)) {
-			if (!plm_video_is_frame_referenced(self, out)) {
-				plm_video_emit_output(self, out);
-			}
+			// Its buffer was unreferenced when it was decoded into, and
+			// nothing references a picture before it's emitted.
+			assertf(!plm_video_is_frame_referenced(self, out),
+				"MPEG1: a decoded picture's buffer is referenced before it's emitted");
+			plm_video_emit_output(self, out);
 		}
 	}
 
