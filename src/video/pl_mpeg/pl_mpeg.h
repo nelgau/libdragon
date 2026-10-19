@@ -4090,12 +4090,12 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	plm_buffer_has(self->buffer, 64*24);
 
 	// The bit reader's position lives in locals for the whole loop and goes
-	// back into self->buffer once, when the loop ends. Kept in the buffer, it
-	// was stored to memory on every coefficient, beside rspq_write's store of
-	// the RSP command cursor; when the two landed in the same data-cache slot
-	// (an exact multiple of 8 KB apart), each coefficient evicted the other's
-	// line dirty, about 4 ms a frame, in some builds and not others, by where
-	// the linker happened to put them.
+	// back into self->buffer once, when the loop ends. In the buffer it would
+	// be stored on every coefficient, next to rspq_write's store of the RSP
+	// command cursor, and when the two share a data-cache slot (a multiple of
+	// 8 KB apart, which depends on where the linker puts them) each
+	// coefficient evicts the other's line dirty: about 4 ms a frame on the
+	// hard clip.
 	const uint8_t *bytes = self->buffer->bytes;
 	size_t bit_index = self->buffer->bit_index;
 	while (TRUE) {
