@@ -1672,11 +1672,17 @@ uint64_t plm_buffer_showbits(plm_buffer_t *self) {
 	return bits;
 }
 
-uint64_t plm_buffer_showbits2(plm_buffer_t *self) {
+// The next 64 bits at bit_index in bytes, without checking that they're
+// there (the caller has: plm_buffer_has).
+static inline uint64_t plm_buffer_showbits_at(const uint8_t *bytes, size_t bit_index) {
 	typedef uint64_t u_uint64_t __attribute__((aligned(1)));
-	uint64_t bits = *(u_uint64_t*)&self->bytes[self->bit_index >> 3];
-	bits <<= self->bit_index & 7;
+	uint64_t bits = *(const u_uint64_t*)&bytes[bit_index >> 3];
+	bits <<= bit_index & 7;
 	return bits;
+}
+
+uint64_t plm_buffer_showbits2(plm_buffer_t *self) {
+	return plm_buffer_showbits_at(self->bytes, self->bit_index);
 }
 
 int plm_buffer_read(plm_buffer_t *self, int count) {
@@ -4082,6 +4088,16 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	// Decode AC coefficients (+DC for non-intra)
 	PROFILE_START(PS_MPEG_MB_DECODE_AC);
 	plm_buffer_has(self->buffer, 64*24);
+
+	// The bit reader's position lives in locals for the whole loop and goes
+	// back into self->buffer once, when the loop ends. Kept in the buffer, it
+	// was stored to memory on every coefficient, beside rspq_write's store of
+	// the RSP command cursor; when the two landed in the same data-cache slot
+	// (an exact multiple of 8 KB apart), each coefficient evicted the other's
+	// line dirty, about 4 ms a frame, in some builds and not others, by where
+	// the linker happened to put them.
+	const uint8_t *bytes = self->buffer->bytes;
+	size_t bit_index = self->buffer->bit_index;
 	while (TRUE) {
 		static const uint16_t qtable0[128] __attribute__((aligned(16))) = { 0,0,0,0,65535,65535,65535,65535,49666,49666,51457,51457,49156,49156,51201,51201,42753,42753,42753,42753,42497,42497,42497,42497,41218,41218,41218,41218,42241,42241,42241,42241,60673,57350,60417,60161,58114,57603,57349,59905,32771,32771,32771,32771,32771,32771,32771,32771,33793,33793,33793,33793,33793,33793,33793,33793,33537,33537,33537,33537,33537,33537,33537,33537,24578,24578,24578,24578,24578,24578,24578,24578,24578,24578,24578,24578,24578,24578,24578,24578,25089,25089,25089,25089,25089,25089,25089,25089,25089,25089,25089,25089,25089,25089,25089,25089,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641,16641 };
 		static const uint16_t qtables1[256] __attribute__((aligned(16))) = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 57618, 57617, 57616, 57615, 58883, 61442, 61186, 60930, 60674, 60418, 60162, 65281, 65025, 64769, 64513, 64257, 49192, 49192, 49191, 49191, 49190, 49190, 49189, 49189, 49188, 49188, 49187, 49187, 49186, 49186, 49185, 49185, 49184, 49184, 49422, 49422, 49421, 49421, 49420, 49420, 49419, 49419, 49418, 49418, 49417, 49417, 49416, 49416, 40991, 40991, 40991, 40991, 40990, 40990, 40990, 40990, 40989, 40989, 40989, 40989, 40988, 40988, 40988, 40988, 40987, 40987, 40987, 40987, 40986, 40986, 40986, 40986, 40985, 40985, 40985, 40985, 40984, 40984, 40984, 40984, 40983, 40983, 40983, 40983, 40982, 40982, 40982, 40982, 40981, 40981, 40981, 40981, 40980, 40980, 40980, 40980, 40979, 40979, 40979, 40979, 40978, 40978, 40978, 40978, 40977, 40977, 40977, 40977, 40976, 40976, 40976, 40976, 35330, 35330, 35330, 35330, 35330, 35330, 35330, 35330, 35074, 35074, 35074, 35074, 35074, 35074, 35074, 35074, 34051, 34051, 34051, 34051, 34051, 34051, 34051, 34051, 33540, 33540, 33540, 33540, 33540, 33540, 33540, 33540, 33285, 33285, 33285, 33285, 33285, 33285, 33285, 33285, 33031, 33031, 33031, 33031, 33031, 33031, 33031, 33031, 33030, 33030, 33030, 33030, 33030, 33030, 33030, 33030, 32783, 32783, 32783, 32783, 32783, 32783, 32783, 32783, 32782, 32782, 32782, 32782, 32782, 32782, 32782, 32782, 32781, 32781, 32781, 32781, 32781, 32781, 32781, 32781, 32780, 32780, 32780, 32780, 32780, 32780, 32780, 32780, 39425, 39425, 39425, 39425, 39425, 39425, 39425, 39425, 39169, 39169, 39169, 39169, 39169, 39169, 39169, 39169, 38913, 38913, 38913, 38913, 38913, 38913, 38913, 38913, 38657, 38657, 38657, 38657, 38657, 38657, 38657, 38657, 38401, 38401, 38401, 38401, 38401, 38401, 38401, 38401 };
@@ -4094,8 +4110,8 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		int run = 0;
 		unsigned int coeff;
 
-		uint64_t bits = plm_buffer_showbits2(self->buffer);
-		#define readbits(n) ({ uint64_t val = bits>>(64-n); bits <<= n; self->buffer->bit_index += n; val; })
+		uint64_t bits = plm_buffer_showbits_at(bytes, bit_index);
+		#define readbits(n) ({ uint64_t val = bits>>(64-n); bits <<= n; bit_index += n; val; })
 
 		if (bits>>63 == 1) { 
 			readbits(1);
@@ -4140,6 +4156,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 
 		n += run;
 		if (n < 0 || n >= 64) {
+			self->buffer->bit_index = bit_index;
 			fprintf(stderr, "INVALID AC COEFF\n");
 			return; // invalid
 		}
@@ -4173,6 +4190,8 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 		n++;
 		// PROFILE_STOP(PS_MPEG_MB_DECODE_AC_DEQUANT);
 	}
+	#undef readbits
+	self->buffer->bit_index = bit_index;
 	PROFILE_STOP(PS_MPEG_MB_DECODE_AC);
 
 	// Move block to its place
