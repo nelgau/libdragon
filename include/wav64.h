@@ -193,6 +193,28 @@ typedef struct wav64_reader_s {
 LIBDRAGON_PREVIEW_API
 wav64_t *wav64_load_reader(const wav64_reader_t *reader, const char *debug_name, wav64_loadparms_t *parms);
 
+/**
+ * @brief Move a WAV64's reader back to where its audio data begins.
+ * @preview
+ *
+ * Seeks the reader (#wav64_reader_t) to the offset of the first sample, just
+ * after the header, and does nothing else. Playing the waveform from its start
+ * reads from there anyway; this tells the reader now, ahead of that read, so
+ * a reader that prefetches (its own cache or streaming system) can start
+ * bringing in the beginning early, for example while the application gets
+ * ready to play the WAV64 again from the start.
+ *
+ * The mixer channel's position is separate, and this doesn't touch it: to
+ * play from the start, stop the channel and play the waveform again
+ * (#wav64_play).
+ *
+ * A fully preloaded WAV64 has no reader once loaded, and this does nothing.
+ *
+ * @param   wav         Pointer to wav64_t structure
+ */
+LIBDRAGON_PREVIEW_API
+void wav64_rewind(wav64_t *wav);
+
 /** @brief Configure a WAV64 file for looping playback. */
 void wav64_set_loop(wav64_t *wav, bool loop);
 

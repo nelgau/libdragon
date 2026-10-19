@@ -403,6 +403,13 @@ wav64_t* wav64_load_reader(const wav64_reader_t *reader, const char *debug_name,
 	return internal_open(NULL, *reader, debug_name, parms);
 }
 
+void wav64_rewind(wav64_t *wav)
+{
+	// A preloaded WAV64 let go of its reader once loaded (wav64_io_close).
+	if (wav->st->reader.seek)
+		wav64_io_seek(wav, wav->st->base_offset);
+}
+
 void wav64_play(wav64_t *wav, int ch)
 {
 	mixer_ch_play(ch, &wav->wave);
