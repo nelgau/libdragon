@@ -247,3 +247,21 @@ std::vector<seek_point_t> vconv_generate_seek(const CodecInfo &ci, const std::st
 
 	return pts;
 }
+
+int vconv_count_frames(const std::string &video_path) {
+	std::vector<std::string> cmd = {
+		cfg.ffprobe_path,
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-count_frames",
+		"-show_entries", "stream=nb_read_frames",
+		"-of", "csv=p=0",
+		video_path,
+	};
+	std::string out;
+	int rc = run_process(cmd, out);
+	if (rc != 0) fatal("ffprobe failed counting frames (%d)", rc);
+	int frames = atoi(out.c_str());
+	if (frames <= 0) fatal("ffprobe counted no frames in %s", video_path.c_str());
+	return frames;
+}

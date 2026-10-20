@@ -107,6 +107,9 @@ static void usage(void) {
 	printf("\n");
 	printf("Audio options:\n");
 	printf("       --audio-compress <N>    Pass through to audioconv64: --wav-compress <N>\n");
+	printf("       --audio-match-video     Cut or pad the audio with silence to the video's exact\n");
+	printf("                               length (its frames over its frame rate), so a looping\n");
+	printf("                               video's audio loops with its frames\n");
 	printf("       --no-audio              Disable audio extraction\n");
 	printf("\n");
 	printf("Advanced options:\n");
@@ -347,6 +350,8 @@ int main(int argc, char **argv) {
 				fatal("Invalid deinterlace: %s", cfg.deinterlace.c_str());
 		} else if (arg == "--no-audio") {
 			cfg.audio = false;
+		} else if (arg == "--audio-match-video") {
+			cfg.audio_match_video = true;
 		} else if (arg == "--audio-compress") {
 			if (++i >= argc) fatal("Missing argument for %s", arg.c_str());
 			cfg.audio_compress = argv[i]; // no validation, audioconv64 will handle it
@@ -415,9 +420,11 @@ int main(int argc, char **argv) {
 
 	// Start audio conversion early (runs in background while we analyze/encode video).
 	// We can't do that if seek file generation is requested, as we need to wait for
-	// video encoding to complete first to know the seek offsets.
+	// video encoding to complete first to know the seek offsets, nor if the audio
+	// must match the video's length, which is known once it's encoded.
 	std::thread audio_thread;
-	if (cfg.audio && !cfg.seek) {
+	const bool audio_after_video = cfg.seek || cfg.audio_match_video;
+	if (cfg.audio && !audio_after_video) {
 		// Audio is running in parallel with video encoding; the visible progress is video-based,
 		// but let the user know both are active.
 		progressbar_set_mode(PROGRESS_MODE_VIDEO_AUDIO);
@@ -478,17 +485,25 @@ int main(int argc, char **argv) {
 	}
 	verbose(1, "Output video: %s", er.video_path.c_str());
 
-	if (cfg.seek) {
-		std::vector<seek_point_t> pts = vconv_generate_seek(*ci, er.video_path);
-		if (cfg.audio) {
-			// If audio conversion was deferred due to seek generation, do it now.
-			double fps = ar.out_fps;
-			// Audio runs after video; show progress labeled as Audio.
-			progressbar_set_mode(PROGRESS_MODE_AUDIO);
-			audio_thread = std::thread([pts = std::move(pts), fps]() mutable {
-				(void)vconv_audio_bridge(std::move(pts), fps, true);
-			});
+	if (cfg.audio && audio_after_video) {
+		// Audio conversion was deferred (seek generation, or matching the
+		// video's length): do it now.
+		std::vector<seek_point_t> pts;
+		if (cfg.seek) pts = vconv_generate_seek(*ci, er.video_path);
+		double fps = ar.out_fps;
+		double length = 0.0;
+		if (cfg.audio_match_video) {
+			int frames = vconv_count_frames(er.video_path);
+			length = frames / fps;
+			verbose(1, "Audio: matching the video's length, %d frames at %.3f fps: %.6f s", frames, fps, length);
 		}
+		// Audio runs after video; show progress labeled as Audio.
+		progressbar_set_mode(PROGRESS_MODE_AUDIO);
+		audio_thread = std::thread([pts = std::move(pts), fps, length]() mutable {
+			(void)vconv_audio_bridge(std::move(pts), fps, true, length);
+		});
+	} else if (cfg.seek) {
+		(void)vconv_generate_seek(*ci, er.video_path);
 	}
 	
 	// Sync subtitles thread (errors will abort via fatal()).

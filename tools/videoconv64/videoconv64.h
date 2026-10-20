@@ -49,6 +49,7 @@ struct Config {
 	// For now, this is an internal toggle (default on).
 	bool par_auto = true;
 	bool audio = true;
+	bool audio_match_video = false;   // cut or pad the audio to the video's exact length
 	bool seek = false;               // generate .seek file with IDR/I-frame offsets (opt-in)
 	double seek_interval_sec = 0.0;  // if >0, request keyframes every N seconds (converted to -g)
 	std::string seek_frames_file;    // if set, text file with frame indices that must be keyframes
@@ -205,6 +206,9 @@ EncodeResult vconv_encode_h264(const CodecInfo &ci, const AnalysisResult &ar);
 // Optional post-processing: generate a .seek sidecar file for the produced elementary stream.
 std::vector<seek_point_t> vconv_generate_seek(const CodecInfo &ci, const std::string &video_path);
 
+// How many frames an encoded video has (ffprobe decodes and counts them).
+int vconv_count_frames(const std::string &video_path);
+
 // Subtitles (SUB64)
 // Convert subtitles (from container tracks and/or extra CLI subtitle files) to .sub64 sidecars.
 // Best-effort: if no subtitles are found, does nothing.
@@ -216,6 +220,8 @@ struct AudioResult {
 	std::string wav64_path;
 };
 
-AudioResult vconv_audio_bridge(std::vector<seek_point_t> seek_points = {}, double video_fps = 0.0, bool show_progress = false);
+// length: the audio's length in seconds, cut or padded with silence to it
+// (0: the audio's own length).
+AudioResult vconv_audio_bridge(std::vector<seek_point_t> seek_points = {}, double video_fps = 0.0, bool show_progress = false, double length = 0.0);
 
 

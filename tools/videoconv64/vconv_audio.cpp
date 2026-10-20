@@ -96,7 +96,11 @@ static std::string output_wav64_path(int out_idx, int total) {
 	return join_path(effective_output_dir(), name);
 }
 
-static std::string extract_audio_to_tmpwav(const std::string &tmpwav, bool from_container, int stream_index, const std::string &audio_file) {
+// The audio, decoded to a WAV at the extraction rate. With a length (in
+// seconds), exactly that long: whatever runs past it is cut, and whatever
+// is missing is silence at the end (resampled first, so the cut is on a
+// sample of the extraction rate).
+static std::string extract_audio_to_tmpwav(const std::string &tmpwav, bool from_container, int stream_index, const std::string &audio_file, double length) {
 	std::vector<std::string> cmd = {
 		cfg.ffmpeg_path,
 		"-hide_banner",
@@ -109,6 +113,12 @@ static std::string extract_audio_to_tmpwav(const std::string &tmpwav, bool from_
 	if (from_container && stream_index >= 0) {
 		cmd.push_back("-map");
 		cmd.push_back("0:" + std::to_string(stream_index));
+	}
+	if (length > 0.0) {
+		long long samples = llround(length * VCONV_AUDIO_EXTRACT_RATE);
+		cmd.push_back("-af");
+		cmd.push_back("aresample=" + std::to_string(VCONV_AUDIO_EXTRACT_RATE) +
+			",apad,atrim=end_sample=" + std::to_string(samples));
 	}
 	cmd.insert(cmd.end(), {
 		"-c:a", "pcm_s16le",
@@ -164,7 +174,7 @@ static std::string write_audio_seekfile(const std::string& wav_path, const std::
 	return tmp;
 }
 
-AudioResult vconv_audio_bridge(std::vector<seek_point_t> seek_points, double video_fps, bool show_progress) {
+AudioResult vconv_audio_bridge(std::vector<seek_point_t> seek_points, double video_fps, bool show_progress, double length) {
 	AudioResult ar;
 	if (!cfg.audio) return ar;
 
@@ -190,7 +200,7 @@ AudioResult vconv_audio_bridge(std::vector<seek_point_t> seek_points, double vid
 		std::string tmpwav = join_path(temp_dir(), "videoconv64_" + stem + "_" + std::to_string((long long)now_ms()) + "_" + std::to_string(out_idx) + ".wav");
 
 		verbose(1, "Extracting audio...");
-		extract_audio_to_tmpwav(tmpwav, from_container, stream_index, src_path);
+		extract_audio_to_tmpwav(tmpwav, from_container, stream_index, src_path, length);
 
 		// If seeking is enabled, generate a temporary seekfile and pass it to audioconv64.
 		// This is simpler and more robust than injecting CUE metadata into the WAV.
