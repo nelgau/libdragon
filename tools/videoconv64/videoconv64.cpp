@@ -493,9 +493,7 @@ int main(int argc, char **argv) {
 		double fps = ar.out_fps;
 		double length = 0.0;
 		if (cfg.audio_match_video) {
-			int frames = vconv_count_frames(er.video_path);
-			length = frames / fps;
-			verbose(1, "Audio: matching the video's length, %d frames at %.3f fps: %.6f s", frames, fps, length);
+			length = vconv_encoded_length(er.video_path, fps);
 		}
 		// Audio runs after video; show progress labeled as Audio.
 		progressbar_set_mode(PROGRESS_MODE_AUDIO);

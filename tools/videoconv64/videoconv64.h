@@ -206,8 +206,12 @@ EncodeResult vconv_encode_h264(const CodecInfo &ci, const AnalysisResult &ar);
 // Optional post-processing: generate a .seek sidecar file for the produced elementary stream.
 std::vector<seek_point_t> vconv_generate_seek(const CodecInfo &ci, const std::string &video_path);
 
-// How many frames an encoded video has (ffprobe decodes and counts them).
-int vconv_count_frames(const std::string &video_path);
+// How long an encoded video plays, in seconds: its frames (ffprobe decodes
+// and counts them) over its frame rate as encoded. For MPEG-1 that's the
+// rate its sequence header names (the encoder writes the nearest rate MPEG-1
+// has, which for a variable-rate source isn't the analysis's); otherwise
+// fps.
+double vconv_encoded_length(const std::string &video_path, double fps);
 
 // Subtitles (SUB64)
 // Convert subtitles (from container tracks and/or extra CLI subtitle files) to .sub64 sidecars.

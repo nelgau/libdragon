@@ -248,14 +248,32 @@ std::vector<seek_point_t> vconv_generate_seek(const CodecInfo &ci, const std::st
 	return pts;
 }
 
-int vconv_count_frames(const std::string &video_path) {
+// The frame rate an MPEG-1 elementary stream's sequence header names: the
+// frame_rate_code after its start code (00 00 01 B3), its width and height
+// (24 bits) and its aspect ratio (4 bits). 0 if there's no sequence header.
+static double mpeg1_header_fps(const std::string &video_path) {
+	static const double rates[16] = { 0, 24000.0 / 1001, 24, 25, 30000.0 / 1001, 30, 50, 60000.0 / 1001, 60 };
+	FILE *f = fopen(video_path.c_str(), "rb");
+	if (!f) fatal("cannot open %s", video_path.c_str());
+	uint8_t buf[4096];
+	size_t n = fread(buf, 1, sizeof(buf), f);
+	fclose(f);
+	for (size_t i = 0; i + 8 <= n; i++) {
+		if (buf[i] == 0 && buf[i + 1] == 0 && buf[i + 2] == 1 && buf[i + 3] == 0xB3) {
+			return rates[buf[i + 7] & 0x0F];
+		}
+	}
+	return 0;
+}
+
+double vconv_encoded_length(const std::string &video_path, double fps) {
 	std::vector<std::string> cmd = {
 		cfg.ffprobe_path,
 		"-v", "error",
 		"-select_streams", "v:0",
 		"-count_frames",
 		"-show_entries", "stream=nb_read_frames",
-		"-of", "csv=p=0",
+		"-of", "default=noprint_wrappers=1:nokey=1",
 		video_path,
 	};
 	std::string out;
@@ -263,5 +281,11 @@ int vconv_count_frames(const std::string &video_path) {
 	if (rc != 0) fatal("ffprobe failed counting frames (%d)", rc);
 	int frames = atoi(out.c_str());
 	if (frames <= 0) fatal("ffprobe counted no frames in %s", video_path.c_str());
-	return frames;
+	if (cfg.codec == "mpeg1") {
+		double header_fps = mpeg1_header_fps(video_path);
+		if (header_fps <= 0) fatal("no MPEG-1 sequence header in %s", video_path.c_str());
+		fps = header_fps;
+	}
+	verbose(1, "Video length: %d frames at %.3f fps: %.6f s", frames, fps, frames / fps);
+	return frames / fps;
 }
