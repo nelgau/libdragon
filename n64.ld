@@ -136,6 +136,20 @@ SECTIONS {
     
     /* Small data START */
 
+    /* The small data (sdata, then sbss) is where the compiler puts every
+     * small global: among them the hottest lines in a program, like the RSP
+     * queue's write cursor (written on every command), the profiler's
+     * counters and the kernel's accounting. The CPU's data cache is 8 KB,
+     * direct-mapped, so where a line falls in it is its address modulo 8 KB:
+     * left to the layout, these lines can land on the same slots as a hot
+     * stack frame and evict each other on every call (hi-player NOTES
+     * 2026-10-20). So the small data starts at a chosen place in the 8 KB
+     * period, whatever comes before it: 2048 bytes in, slots 128 and up,
+     * away from the first slots (where an 8 KB aligned block goes) and from
+     * the last ones (the stack's frames, under the top of RAM, a multiple of
+     * 8 KB). It costs less than 8 KB of RAM. */
+    . = . + ((2048 - (. & 8191)) & 8191);
+
     .sdata : {
         _gp = . + 0x8000;
         *(.sdata)
