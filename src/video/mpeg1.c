@@ -15,12 +15,16 @@
 #include "video_internal.h"
 #include <assert.h>
 #include <errno.h>
+#include <malloc.h>
 #include "mpeg1_internal.h"
+
+typedef struct mpeg1_decoder_s mpeg1_decoder_t;
 
 typedef struct mpeg1_s {
 	video_t video;
-	plm_buffer_t *buf;
-	plm_video_t *v;
+	mpeg1_decoder_t *decoder;  ///< Where buf and v live
+	plm_buffer_t *buf;         ///< &decoder->buffer
+	plm_video_t *v;            ///< &decoder->video
 	int buffered_pics;
 	bool has_reader;        ///< Opened with video_open_reader
 	bool reader_ended;      ///< The reader returned VIDEO_READ_END
@@ -135,6 +139,28 @@ void rsp_mpeg1_set_quant_matrix(bool intra, const uint8_t quant_mtx[64]) {
 #define PL_MPEG_IMPLEMENTATION
 #include "pl_mpeg/pl_mpeg.h"
 
+/**
+ * @brief The decoder's two structs, in one block aligned to the data cache's size
+ *
+ * The CPU's data cache is 8 KB, direct-mapped: where a line falls in it is
+ * its address modulo 8 KB. The decoder reads these two structs every few
+ * bits. In a block aligned to 8 KB, they always take the cache's first slots
+ * (904 bytes: slots 0 to 56), wherever the rest of the program lands: away
+ * from the small data (n64.ld starts it 2048 bytes into the 8 KB period,
+ * slots 128 and up) and from the stack's hot frames (under the top of RAM,
+ * the last slots). Left to the heap, they could share slots with either and
+ * evict each other on every call (hi-player NOTES 2026-10-20).
+ */
+typedef struct mpeg1_decoder_s {
+	plm_video_t video;
+	plm_buffer_t buffer;
+} mpeg1_decoder_t;
+
+#define MPEG1_DECODER_ALIGN   8192
+
+_Static_assert(sizeof(mpeg1_decoder_t) <= 2048,
+	"the decoder block reaches the small data's slots (n64.ld)");
+
 static void mpeg1_fill_info(mpeg1_t *mp1) {
 	mp1->video.info.width = plm_video_get_width(mp1->v);
 	mp1->video.info.height = plm_video_get_height(mp1->v);
@@ -147,6 +173,15 @@ static void mpeg1_fill_info(mpeg1_t *mp1) {
 	mp1->video.info.colorspace = YUV_BT601_TV;
 }
 
+// Allocates the decoder block; buf and v point into it, and are built there
+// by the open functions.
+static void mpeg1_alloc_decoder(mpeg1_t *mp1) {
+	mp1->decoder = memalign(MPEG1_DECODER_ALIGN, sizeof(mpeg1_decoder_t));
+	assertf(mp1->decoder, "Out of memory");
+	mp1->buf = &mp1->decoder->buffer;
+	mp1->v = &mp1->decoder->video;
+}
+
 static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
 	(void)parms;
 	mpeg1_t *mp1 = malloc(sizeof(mpeg1_t));
@@ -155,14 +190,15 @@ static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
 
 	rsp_mpeg1_init();
 
-	mp1->buf = plm_buffer_create_with_filename(fn);
-	assertf(mp1->buf, "error opening file %s: %s\n", fn, strerror(errno));
+	FILE *fh = fopen(fn, "rb");
+	assertf(fh, "error opening file %s: %s\n", fn, strerror(errno));
+	mpeg1_alloc_decoder(mp1);
+	plm_buffer_init_with_file(mp1->buf, fh, true);
 
 	// Disable buffering for every filesystem.
 	setvbuf(mp1->buf->fh, NULL, _IONBF, 0);
 
-	mp1->v = plm_video_create_with_buffer(mp1->buf, true);
-	assert(mp1->v);
+	plm_video_init_with_buffer(mp1->v, mp1->buf, false);
 
 	mp1->buffered_pics = parms ? parms->buffered_pics : 1;
 	if (mp1->buffered_pics < 1) mp1->buffered_pics = 1;
@@ -230,12 +266,12 @@ static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parm
 	// A fixed-size buffer: the load callback only reads what fits, so it never
 	// grows. Ring mode lets consumed bytes be discarded.
 	int size = parms && parms->reader_buffer_size > 0 ? parms->reader_buffer_size : MPEG1_READER_BUFFER_DEFAULT;
-	mp1->buf = plm_buffer_create_with_capacity(size);
+	mpeg1_alloc_decoder(mp1);
+	plm_buffer_init_with_capacity(mp1->buf, size);
 	mp1->has_reader = true;
 	mp1->reader = *reader;
 
-	mp1->v = plm_video_create_with_buffer(mp1->buf, true);
-	assert(mp1->v);
+	plm_video_init_with_buffer(mp1->v, mp1->buf, false);
 
 	mp1->buffered_pics = parms ? parms->buffered_pics : 1;
 	if (mp1->buffered_pics < 1) mp1->buffered_pics = 1;
@@ -391,9 +427,11 @@ static int mpeg1_frames_waiting(video_t *v) {
 
 static void mpeg1_close(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
-	// Every frame taken must have been released by now (plm_video_destroy
+	// Every frame taken must have been released by now (plm_video_deinit
 	// asserts that no picture is still referenced).
-	plm_video_destroy(mp1->v);
+	plm_video_deinit(mp1->v);
+	plm_buffer_deinit(mp1->buf);
+	free(mp1->decoder);
 	if (mp1->has_reader && mp1->reader.close)
 		mp1->reader.close(mp1->reader.ctx);
 	free(mp1);

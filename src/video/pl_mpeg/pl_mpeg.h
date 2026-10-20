@@ -514,6 +514,17 @@ plm_buffer_t *plm_buffer_create_for_appending(size_t initial_capacity);
 void plm_buffer_destroy(plm_buffer_t *self);
 
 
+// libdragon: build a buffer in memory the caller provides (inside a larger
+// struct, say). The init functions set up *self like the matching create
+// functions; plm_buffer_deinit() frees what the buffer holds (its data, its
+// file) but not *self. Each create function allocates, then inits; destroy
+// deinits, then frees.
+
+void plm_buffer_init_with_file(plm_buffer_t *self, FILE *fh, int close_when_done);
+void plm_buffer_init_with_capacity(plm_buffer_t *self, size_t capacity);
+void plm_buffer_deinit(plm_buffer_t *self);
+
+
 // Copy data into the buffer. If the data to be written is larger than the 
 // available space, the buffer will realloc() with a larger capacity. 
 // Returns the number of bytes written. This will always be the same as the
@@ -657,6 +668,15 @@ plm_video_t *plm_video_create_with_buffer(plm_buffer_t *buffer, int destroy_when
 // Destroy a video decoder and free all data.
 
 void plm_video_destroy(plm_video_t *self);
+
+
+// libdragon: build a video decoder in memory the caller provides, like the
+// buffer's init functions. plm_video_init_with_buffer() sets up *self like
+// plm_video_create_with_buffer(); plm_video_deinit() frees what the decoder
+// holds (its pictures, and its buffer if destroy_when_done) but not *self.
+
+void plm_video_init_with_buffer(plm_video_t *self, plm_buffer_t *buffer, int destroy_when_done);
+void plm_video_deinit(plm_video_t *self);
 
 
 // Get whether a sequence header was found and we can accurately report on
@@ -1456,7 +1476,14 @@ plm_buffer_t *plm_buffer_create_with_filename(const char *filename) {
 }
 
 plm_buffer_t *plm_buffer_create_with_file(FILE *fh, int close_when_done) {
-	plm_buffer_t *self = plm_buffer_create_with_capacity(PLM_BUFFER_DEFAULT_SIZE);
+	plm_buffer_t *self = (plm_buffer_t *)malloc(sizeof(plm_buffer_t));
+	assertf(self, "Out of memory");
+	plm_buffer_init_with_file(self, fh, close_when_done);
+	return self;
+}
+
+void plm_buffer_init_with_file(plm_buffer_t *self, FILE *fh, int close_when_done) {
+	plm_buffer_init_with_capacity(self, PLM_BUFFER_DEFAULT_SIZE);
 	self->fh = fh;
 	self->close_when_done = close_when_done;
 	self->mode = PLM_BUFFER_MODE_FILE;
@@ -1465,7 +1492,6 @@ plm_buffer_t *plm_buffer_create_with_file(FILE *fh, int close_when_done) {
 	fseek(self->fh, 0, SEEK_END);
 	self->total_size = ftell(self->fh);
 	fseek(self->fh, 0, SEEK_SET);	plm_buffer_set_load_callback(self, plm_buffer_load_file_callback, NULL);
-	return self;
 }
 
 plm_buffer_t *plm_buffer_create_with_memory(uint8_t *bytes, size_t length, int free_when_done) {
@@ -1485,6 +1511,11 @@ plm_buffer_t *plm_buffer_create_with_memory(uint8_t *bytes, size_t length, int f
 plm_buffer_t *plm_buffer_create_with_capacity(size_t capacity) {
 	plm_buffer_t *self = (plm_buffer_t *)malloc(sizeof(plm_buffer_t));
 	assertf(self, "Out of memory");
+	plm_buffer_init_with_capacity(self, capacity);
+	return self;
+}
+
+void plm_buffer_init_with_capacity(plm_buffer_t *self, size_t capacity) {
 	memset(self, 0, sizeof(plm_buffer_t));
 	self->capacity = capacity;
 	self->free_when_done = TRUE;
@@ -1492,7 +1523,6 @@ plm_buffer_t *plm_buffer_create_with_capacity(size_t capacity) {
 	assertf(self->bytes, "Out of memory");
 	self->mode = PLM_BUFFER_MODE_RING;
 	self->discard_read_bytes = TRUE;
-	return self;
 }
 
 plm_buffer_t *plm_buffer_create_for_appending(size_t initial_capacity) {
@@ -1503,13 +1533,17 @@ plm_buffer_t *plm_buffer_create_for_appending(size_t initial_capacity) {
 }
 
 void plm_buffer_destroy(plm_buffer_t *self) {
+	plm_buffer_deinit(self);
+	free(self);
+}
+
+void plm_buffer_deinit(plm_buffer_t *self) {
 	if (self->fh && self->close_when_done) {
 		fclose(self->fh);
 	}
 	if (self->free_when_done) {
 		free(self->bytes);
 	}
-	free(self);
 }
 
 size_t plm_buffer_get_size(plm_buffer_t *self) {
@@ -2877,8 +2911,13 @@ static void plm_video_parse_initial_userdata(plm_video_t *self) {
 plm_video_t * plm_video_create_with_buffer(plm_buffer_t *buffer, int destroy_when_done) {
 	plm_video_t *self = (plm_video_t *)malloc(sizeof(plm_video_t));
 	assertf(self, "Out of memory");
+	plm_video_init_with_buffer(self, buffer, destroy_when_done);
+	return self;
+}
+
+void plm_video_init_with_buffer(plm_video_t *self, plm_buffer_t *buffer, int destroy_when_done) {
 	memset(self, 0, sizeof(plm_video_t));
-	
+
 	self->buffer = buffer;
 	self->destroy_buffer_when_done = destroy_when_done;
 
@@ -2891,7 +2930,6 @@ plm_video_t * plm_video_create_with_buffer(plm_buffer_t *buffer, int destroy_whe
 
 	// Do not scan/decode here: avoid triggering I/O during object creation.
 	self->start_code = -1;
-	return self;
 }
 
 // libdragon: the RSP holds one pair of quantization matrices (rsp_mpeg1.S,
@@ -2916,6 +2954,11 @@ static void plm_video_drop_output(plm_video_t *self);
 static int plm_video_referenced_pictures(plm_video_t *self);
 
 void plm_video_destroy(plm_video_t *self) {
+	plm_video_deinit(self);
+	free(self);
+}
+
+void plm_video_deinit(plm_video_t *self) {
 	if (plm_video_rsp_matrices_owner == self) {
 		plm_video_rsp_matrices_owner = NULL;
 	}
@@ -2939,8 +2982,6 @@ void plm_video_destroy(plm_video_t *self) {
 		else
 			free(self->frames_data);
 	}
-
-	free(self);
 }
 
 double plm_video_get_framerate(plm_video_t *self) {
