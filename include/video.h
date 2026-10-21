@@ -135,6 +135,7 @@ typedef struct video_parms_s {
 typedef enum {
     VIDEO_FRAME,        ///< A new frame was decoded (returned in the #video_frame_t)
     VIDEO_NEED_DATA,    ///< #video_open_reader only: the reader has no data yet; try again later
+    VIDEO_NEED_PICTURE, ///< Every picture is in use (decoded ahead, or referenced); try again once a frame is dropped (#video_frame_unref)
     VIDEO_END,          ///< The stream is finished
 } video_status_t;
 
@@ -368,8 +369,11 @@ typedef struct video_frame_s {
  * Takes the next frame in display order: one already decoded ahead by
  * #video_poll if one is waiting (#video_frames_waiting), otherwise it decodes
  * it now. If there is no frame, the return value says why: the stream is
- * finished (#VIDEO_END), or, for a video opened with #video_open_reader, the
- * reader has no data yet (#VIDEO_NEED_DATA; try again later).
+ * finished (#VIDEO_END); for a video opened with #video_open_reader, the
+ * reader has no data yet (#VIDEO_NEED_DATA; try again later); or every
+ * picture is in use, the ones the decoder decodes with and the ones
+ * referenced (#VIDEO_NEED_PICTURE: try again once a frame is dropped with
+ * #video_frame_unref).
  *
  * The frame is yours: it comes with a reference (see #video_frame_ref), and
  * its picture stays valid, its memory not reused by the decoder, until you
@@ -388,7 +392,8 @@ typedef struct video_frame_s {
  * @param v             Handle to the video
  * @param frame         Filled in with the frame when the result is
  *                      #VIDEO_FRAME
- * @return              #VIDEO_FRAME, #VIDEO_NEED_DATA or #VIDEO_END
+ * @return              #VIDEO_FRAME, #VIDEO_NEED_DATA, #VIDEO_NEED_PICTURE or
+ *                      #VIDEO_END
  *
  * @see #yuv_tex_blit
  * @see #yuv_blitter_new_fmv

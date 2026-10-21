@@ -744,8 +744,15 @@ void plm_video_set_pictures(plm_video_t *self, uint8_t *data, size_t stride, int
 size_t plm_video_picture_size(int width, int height);
 
 // Do a small chunk of decoding work. Returns 1 if work was done, 0 if no work
-// could be done (eg: need more input data, output queue full, or EOF).
+// could be done (eg: need more input data, output queue full, no free
+// picture, or EOF).
 int plm_video_poll(plm_video_t *self);
+
+// libdragon: whether the last poll stopped for want of a picture to decode
+// into: every one is in use (one it decodes with, queued, or referenced:
+// taken, or held by someone else, such as the RDP). Decoding goes on once a
+// reference is dropped.
+int plm_video_needs_picture(plm_video_t *self);
 
 // Pictures are reference counted. A picture's buffer is reused for decoding
 // only once nobody references it: the output queue references each picture
@@ -2821,6 +2828,7 @@ typedef struct plm_video_t {
 	int num_frame_buffers;
 	uint8_t *frame_refs;   // [num_frame_buffers] references to each picture (queue, consumer, others); reused only at 0
 	int owns_pictures;
+	int needs_picture;     // the last poll stopped for want of a free picture (plm_video_needs_picture)
 
 	// libdragon extension: output buffering + incremental polling
 	int buffered_pics; // requested output queue capacity (>=1)
@@ -3375,8 +3383,13 @@ void plm_video_release_output(plm_video_t *self, const plm_frame_t *frame) {
 	self->out_current_in_use = 0;
 }
 
+int plm_video_needs_picture(plm_video_t *self) {
+	return self->needs_picture;
+}
+
 int plm_video_poll(plm_video_t *self) {
 	if (!self) return 0;
+	self->needs_picture = FALSE;
 	if (self->buffered_pics <= 0) return 0;
 	if (!plm_video_has_header(self)) return 0;
 	if (!self->frames_data) plm_video_alloc_pictures(self);
@@ -3444,6 +3457,7 @@ int plm_video_poll(plm_video_t *self) {
 			redirect_b = 1;
 			redirect_idx = plm_video_find_free_b_buffer(self);
 			if (redirect_idx < 0) {
+				self->needs_picture = TRUE;
 				return 0; // no free output buffers
 			}
 		} else {
@@ -3452,6 +3466,7 @@ int plm_video_poll(plm_video_t *self) {
 				redirect_ip = 1;
 				redirect_idx = plm_video_find_free_b_buffer(self);
 				if (redirect_idx < 0) {
+					self->needs_picture = TRUE;
 					return 0;
 				}
 			}

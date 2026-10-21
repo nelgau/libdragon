@@ -365,7 +365,9 @@ static int mpeg1_poll(video_t *v) {
 	if (plm_video_poll(mp1->v))
 		return 1;
 	// Stuck. A full picture queue is a reason: wait for a frame to be taken.
-	if (plm_video_out_full(mp1->v))
+	// So is every picture in use: wait for one to be dropped (meanwhile the
+	// bitstream buffer may well fill up with bytes not yet decoded).
+	if (plm_video_out_full(mp1->v) || plm_video_needs_picture(mp1->v))
 		return 0;
 	// Otherwise the bitstream buffer may be full of bytes already decoded:
 	// make room, and try once more. Taking a frame makes room too
@@ -415,8 +417,11 @@ static video_status_t mpeg1_take_frame(video_t *v, video_frame_t *frame) {
 		return VIDEO_FRAME;
 	}
 
-	// No frame. In file mode, or once the reader reported the end, that's the
-	// end of the stream.
+	// No frame. Every picture in use: one must be dropped first. Otherwise,
+	// in file mode, or once the reader reported the end, that's the end of
+	// the stream.
+	if (plm_video_needs_picture(mp1->v))
+		return VIDEO_NEED_PICTURE;
 	if (!mp1->has_reader || mp1->reader_ended)
 		return VIDEO_END;
 
