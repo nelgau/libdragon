@@ -673,7 +673,8 @@ void plm_video_destroy(plm_video_t *self);
 // libdragon: build a video decoder in memory the caller provides, like the
 // buffer's init functions. plm_video_init_with_buffer() sets up *self like
 // plm_video_create_with_buffer(); plm_video_deinit() frees what the decoder
-// holds (its pictures, and its buffer if destroy_when_done) but not *self.
+// holds (its pictures if they're its own, and its buffer if
+// destroy_when_done) but not *self.
 
 void plm_video_init_with_buffer(plm_video_t *self, plm_buffer_t *buffer, int destroy_when_done);
 void plm_video_deinit(plm_video_t *self);
@@ -726,8 +727,21 @@ void plm_video_set_no_delay(plm_video_t *self, int no_delay);
 // This avoids copying full YUV frames while enabling background decoding.
 
 // Configure how many fully decoded pictures can be buffered in the output queue.
-// Must be called before the sequence header is decoded (before frames_data alloc).
+// Must be called before the sequence header is decoded.
 void plm_video_set_buffered_pics(plm_video_t *self, int buffered_pics);
+
+// The pictures the decoder decodes into: count of them, stride bytes apart
+// from data, each with a reference count in refs (count bytes). The decoder
+// shares the counts with whoever lent the pictures, and never frees either.
+// Lent after the sequence header is decoded and before any picture is; they
+// must fit the stream's pictures (asserts), and count must be at least 3 +
+// the buffered pictures. A decoder lent none allocates its own when it
+// decodes its first picture, and frees them at deinit.
+void plm_video_set_pictures(plm_video_t *self, uint8_t *data, size_t stride, int count, uint8_t *refs);
+
+// How many bytes one picture of a width x height stream takes: its three
+// planes, rounded up to whole macroblocks.
+size_t plm_video_picture_size(int width, int height);
 
 // Do a small chunk of decoding work. Returns 1 if work was done, 0 if no work
 // could be done (eg: need more input data, output queue full, or EOF).
@@ -2800,10 +2814,13 @@ typedef struct plm_video_t {
 	plm_frame_t frame_forward;
 	plm_frame_t frame_backward;
 
+	// libdragon: the pictures it decodes into: lent (plm_video_set_pictures),
+	// or its own (owns_pictures).
 	uint8_t *frames_data;
-	size_t frame_data_size;
+	size_t frame_data_size;   // bytes from one picture to the next
 	int num_frame_buffers;
 	uint8_t *frame_refs;   // [num_frame_buffers] references to each picture (queue, consumer, others); reused only at 0
+	int owns_pictures;
 
 	// libdragon extension: output buffering + incremental polling
 	int buffered_pics; // requested output queue capacity (>=1)
@@ -2952,6 +2969,7 @@ static void plm_video_rsp_claim_matrices(plm_video_t *self) {
 
 static void plm_video_drop_output(plm_video_t *self);
 static int plm_video_referenced_pictures(plm_video_t *self);
+static void plm_video_alloc_pictures(plm_video_t *self);
 
 void plm_video_destroy(plm_video_t *self) {
 	plm_video_deinit(self);
@@ -2967,20 +2985,23 @@ void plm_video_deinit(plm_video_t *self) {
 	}
 
 	if (self->has_sequence_header) {
-		// The queue's and the consumer's references go with the decoder;
-		// anyone else's must be dropped first: the picture memory is freed
-		// here, and whoever references a picture (the RDP, drawing it) would
-		// read freed memory.
+		// The queue's and the consumer's references go with the decoder.
 		plm_video_drop_output(self);
-		int referenced = plm_video_referenced_pictures(self);
-		assertf(referenced == 0,
-			"MPEG1: closing with %d picture(s) still referenced; drop them first", referenced);
-		free(self->frame_refs);
 		free(self->out_queue);
-		if (RSP_MODE >= 2)
-			free_uncached(self->frames_data);
-		else
-			free(self->frames_data);
+		// Its own pictures go too, so anyone else's references must be
+		// dropped first: whoever references a picture (the RDP, drawing it)
+		// would read freed memory. Lent pictures stay their lender's,
+		// references and all.
+		if (self->owns_pictures) {
+			int referenced = plm_video_referenced_pictures(self);
+			assertf(referenced == 0,
+				"MPEG1: closing with %d picture(s) still referenced; drop them first", referenced);
+			free(self->frame_refs);
+			if (RSP_MODE >= 2)
+				free_uncached(self->frames_data);
+			else
+				free(self->frames_data);
+		}
 	}
 }
 
@@ -3358,6 +3379,7 @@ int plm_video_poll(plm_video_t *self) {
 	if (!self) return 0;
 	if (self->buffered_pics <= 0) return 0;
 	if (!plm_video_has_header(self)) return 0;
+	if (!self->frames_data) plm_video_alloc_pictures(self);
 	if (plm_video_out_full(self)) return 0;
 
 	int redirect_b = 0;
@@ -3610,28 +3632,8 @@ int plm_video_decode_sequence_header(plm_video_t *self) {
 	self->chroma_height = self->mb_height << 3;
 
 
-	// Allocate one big chunk of data for all 3 frames = 9 planes
-	size_t luma_plane_size = self->luma_width * self->luma_height;
-	size_t chroma_plane_size = self->chroma_width * self->chroma_height;
-	size_t frame_data_size = (luma_plane_size + 2 * chroma_plane_size);
-	self->frame_data_size = frame_data_size;
-	self->num_frame_buffers = 3 + (self->buffered_pics > 0 ? self->buffered_pics : 0);
-
-	if (RSP_MODE >= 2)
-		self->frames_data = (uint8_t*)malloc_uncached(frame_data_size * (size_t)self->num_frame_buffers);
-	else
-		self->frames_data = (uint8_t*)memalign(16, frame_data_size * (size_t)self->num_frame_buffers);
-	assertf(self->frames_data, "Out of memory");
-	plm_video_init_frame(self, &self->frame_current, self->frames_data + frame_data_size * 0);
-	plm_video_init_frame(self, &self->frame_forward, self->frames_data + frame_data_size * 1);
-	plm_video_init_frame(self, &self->frame_backward, self->frames_data + frame_data_size * 2);
-
-	self->frame_refs = (uint8_t*)calloc((size_t)self->num_frame_buffers, 1);
-	assertf(self->frame_refs, "Out of memory");
-	if (self->buffered_pics > 0) {
-		self->out_queue = (plm_frame_t*)calloc((size_t)self->buffered_pics, sizeof(plm_frame_t));
-		assertf(self->out_queue, "Out of memory");
-	}
+	// libdragon: the pictures come next, lent (plm_video_set_pictures) or
+	// its own (plm_video_alloc_pictures, at the first picture).
 	self->out_q_head = self->out_q_tail = self->out_q_count = 0;
 	self->out_current_in_use = 0;
 	self->poll_state = PLM_POLL_STATE_IDLE;
@@ -3658,6 +3660,60 @@ void plm_video_init_frame(plm_video_t *self, plm_frame_t *frame, uint8_t *base) 
 	frame->cb.width = self->chroma_width;
 	frame->cb.height = self->chroma_height;
 	frame->cb.data = base + luma_plane_size + chroma_plane_size;
+}
+
+size_t plm_video_picture_size(int width, int height) {
+	size_t luma_plane_size = (size_t)(((width + 15) >> 4) << 4) * (size_t)(((height + 15) >> 4) << 4);
+	return luma_plane_size + 2 * (luma_plane_size / 4);
+}
+
+// libdragon: the decoder starts on its pictures: the first three are the
+// ones it decodes with (the one it decodes into, and the two it predicts
+// from), and the output queue is made.
+static void plm_video_use_pictures(plm_video_t *self) {
+	plm_video_init_frame(self, &self->frame_current, self->frames_data + self->frame_data_size * 0);
+	plm_video_init_frame(self, &self->frame_forward, self->frames_data + self->frame_data_size * 1);
+	plm_video_init_frame(self, &self->frame_backward, self->frames_data + self->frame_data_size * 2);
+	if (self->buffered_pics > 0) {
+		self->out_queue = (plm_frame_t*)calloc((size_t)self->buffered_pics, sizeof(plm_frame_t));
+		assertf(self->out_queue, "Out of memory");
+	}
+}
+
+void plm_video_set_pictures(plm_video_t *self, uint8_t *data, size_t stride, int count, uint8_t *refs) {
+	assertf(self->has_sequence_header, "MPEG1: pictures are lent once the sequence header is decoded");
+	assertf(!self->frames_data, "MPEG1: the decoder already has its pictures");
+	size_t picture_size = plm_video_picture_size(self->width, self->height);
+	assertf(picture_size <= stride,
+		"MPEG1: a %dx%d picture takes %d bytes; the pictures lent are %d bytes apart",
+		self->width, self->height, (int)picture_size, (int)stride);
+	int needed = 3 + (self->buffered_pics > 0 ? self->buffered_pics : 0);
+	assertf(count >= needed,
+		"MPEG1: decoding %d pictures ahead takes %d pictures; %d lent", self->buffered_pics, needed, count);
+	self->frames_data = data;
+	self->frame_data_size = stride;
+	self->num_frame_buffers = count;
+	self->frame_refs = refs;
+	self->owns_pictures = FALSE;
+	plm_video_use_pictures(self);
+}
+
+// libdragon: a decoder lent no pictures allocates its own: one big chunk for
+// all of them, laid out as plm_video_set_pictures would have them.
+static void plm_video_alloc_pictures(plm_video_t *self) {
+	size_t frame_data_size = plm_video_picture_size(self->width, self->height);
+	self->frame_data_size = frame_data_size;
+	self->num_frame_buffers = 3 + (self->buffered_pics > 0 ? self->buffered_pics : 0);
+
+	if (RSP_MODE >= 2)
+		self->frames_data = (uint8_t*)malloc_uncached(frame_data_size * (size_t)self->num_frame_buffers);
+	else
+		self->frames_data = (uint8_t*)memalign(16, frame_data_size * (size_t)self->num_frame_buffers);
+	assertf(self->frames_data, "Out of memory");
+	self->frame_refs = (uint8_t*)calloc((size_t)self->num_frame_buffers, 1);
+	assertf(self->frame_refs, "Out of memory");
+	self->owns_pictures = TRUE;
+	plm_video_use_pictures(self);
 }
 
 void plm_video_decode_slice(plm_video_t *self, int slice) {

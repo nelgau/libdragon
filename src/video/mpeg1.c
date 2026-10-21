@@ -26,6 +26,8 @@ typedef struct mpeg1_s {
 	plm_buffer_t *buf;         ///< &decoder->buffer
 	plm_video_t *v;            ///< &decoder->video
 	int buffered_pics;
+	video_picture_pool_t *pool;  ///< The pictures it decodes into
+	bool own_pool;          ///< Its own, made at open and freed at close (no video_parms_t::picture_pool)
 	bool has_reader;        ///< Opened with video_open_reader
 	bool reader_ended;      ///< The reader returned VIDEO_READ_END
 	bool loop;              ///< At the end of the data, rewind the reader and keep going
@@ -182,8 +184,38 @@ static void mpeg1_alloc_decoder(mpeg1_t *mp1) {
 	mp1->v = &mp1->decoder->video;
 }
 
+// How far ahead it decodes: the pool's, if one is lent (so one place says
+// it), or the parameters'.
+static int mpeg1_buffered_pics(const video_parms_t *parms) {
+	video_picture_pool_t *pool = parms ? parms->picture_pool : NULL;
+	if (pool) {
+		assertf(parms->buffered_pics == 0 || parms->buffered_pics == pool->buffered_pics,
+			"MPEG1: buffered_pics is %d, and the picture pool's is %d", parms->buffered_pics, pool->buffered_pics);
+		return pool->buffered_pics;
+	}
+	int buffered_pics = parms ? parms->buffered_pics : 1;
+	return buffered_pics < 1 ? 1 : buffered_pics;
+}
+
+// Once the header says the video's size: the pictures it decodes into, lent
+// (video_parms_t::picture_pool) or its own, made now.
+static void mpeg1_take_pictures(mpeg1_t *mp1, const video_parms_t *parms) {
+	int width = plm_video_get_width(mp1->v), height = plm_video_get_height(mp1->v);
+	video_picture_pool_t *pool = parms ? parms->picture_pool : NULL;
+	mp1->own_pool = !pool;
+	if (mp1->own_pool) {
+		pool = video_picture_pool_alloc(&mpeg1_codec, width, height, mp1->buffered_pics);
+	}
+	assertf(pool->codec == &mpeg1_codec, "MPEG1: a picture pool made for codec %s", pool->codec->extension);
+	assertf(width <= pool->width && height <= pool->height,
+		"MPEG1: a %dx%d video doesn't fit a picture pool made for %dx%d", width, height, pool->width, pool->height);
+	assertf(!pool->lent, "MPEG1: another video is decoding into the picture pool");
+	pool->lent = true;
+	plm_video_set_pictures(mp1->v, pool->data, pool->picture_size, pool->count, pool->refs);
+	mp1->pool = pool;
+}
+
 static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
-	(void)parms;
 	mpeg1_t *mp1 = malloc(sizeof(mpeg1_t));
 	assertf(mp1, "Out of memory");
 	memset(mp1, 0, sizeof(mpeg1_t));
@@ -200,8 +232,7 @@ static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
 
 	plm_video_init_with_buffer(mp1->v, mp1->buf, false);
 
-	mp1->buffered_pics = parms ? parms->buffered_pics : 1;
-	if (mp1->buffered_pics < 1) mp1->buffered_pics = 1;
+	mp1->buffered_pics = mpeg1_buffered_pics(parms);
 	plm_video_set_buffered_pics(mp1->v, mp1->buffered_pics);
 
 	// Force decoding of header. This would be done lazily but better do it
@@ -209,6 +240,7 @@ static video_t *mpeg1_open(const char *fn, const video_parms_t *parms) {
 	if (!plm_video_has_header(mp1->v)) {
 		assertf(0, "invalid header in video stream\n");
 	}
+	mpeg1_take_pictures(mp1, parms);
 
 	mpeg1_fill_info(mp1);
 	return &mp1->video;
@@ -273,8 +305,7 @@ static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parm
 
 	plm_video_init_with_buffer(mp1->v, mp1->buf, false);
 
-	mp1->buffered_pics = parms ? parms->buffered_pics : 1;
-	if (mp1->buffered_pics < 1) mp1->buffered_pics = 1;
+	mp1->buffered_pics = mpeg1_buffered_pics(parms);
 	plm_video_set_buffered_pics(mp1->v, mp1->buffered_pics);
 
 	// Like video_open, decode the header now, so the info is valid as soon as
@@ -296,6 +327,7 @@ static video_t *mpeg1_open_reader(const video_reader_t *reader, const video_parm
 	bool has_header = plm_video_has_header(mp1->v);
 	assertf(has_header, "invalid header in video stream\n");
 	plm_buffer_set_load_callback(b, mpeg1_reader_load, mp1);
+	mpeg1_take_pictures(mp1, parms);
 
 	mpeg1_fill_info(mp1);
 	return &mp1->video;
@@ -348,7 +380,8 @@ static int mpeg1_poll(video_t *v) {
 	return plm_video_poll(mp1->v) ? 1 : 0;
 }
 
-// The frame a pl_mpeg picture becomes: planes, index, and which picture it is.
+// The frame a pl_mpeg picture becomes: planes, index, and which picture of
+// which pool it is.
 static video_frame_t mpeg1_frame_of(mpeg1_t *mp1, const plm_frame_t *picture) {
 	surface_t yp  = surface_make_linear(picture->y.data,  FMT_I8, picture->width,   picture->height);
 	surface_t cbp = surface_make_linear(picture->cb.data, FMT_I8, picture->width/2, picture->height/2);
@@ -358,6 +391,7 @@ static video_frame_t mpeg1_frame_of(mpeg1_t *mp1, const plm_frame_t *picture) {
 	return (video_frame_t){
 		.yuv = { .y = yp, .u = cbp, .v = crp },
 		.index = picture->index,
+		.pool = mp1->pool,
 		.picture_id = plm_video_picture_id(mp1->v, picture),
 	};
 }
@@ -409,15 +443,37 @@ static void mpeg1_rewind(video_t *v) {
 	plm_video_rewind(mp1->v);
 }
 
-// A frame's picture_id is the pl_mpeg picture it came from (mpeg1_frame_of).
-static void mpeg1_frame_ref(video_t *v, const video_frame_t *frame) {
-	mpeg1_t *mp1 = (mpeg1_t *)v;
-	plm_video_ref_picture(mp1->v, frame->picture_id);
+// The pictures MPEG-1 decodes into: each one's planes (Y, then Cr, then Cb,
+// rounded up to whole macroblocks), one after another, as pl_mpeg lays them
+// out (plm_video_set_pictures); in uncached memory when the RSP writes them.
+// The three it decodes with come on top of the ones decoded ahead.
+static video_picture_pool_t *mpeg1_picture_pool_alloc(int width, int height, int buffered_pics) {
+	if (buffered_pics < 1) buffered_pics = 1;
+	int count = 3 + buffered_pics;
+	size_t picture_size = plm_video_picture_size(width, height);
+	uint8_t *data;
+	if (RSP_MODE >= 2)
+		data = malloc_uncached(picture_size * (size_t)count);
+	else
+		data = memalign(16, picture_size * (size_t)count);
+	assertf(data, "Out of memory");
+	video_picture_pool_t *pool = calloc(1, sizeof(video_picture_pool_t) + (size_t)count);
+	assertf(pool, "Out of memory");
+	pool->width = width;
+	pool->height = height;
+	pool->buffered_pics = buffered_pics;
+	pool->count = count;
+	pool->picture_size = picture_size;
+	pool->data = data;
+	return pool;
 }
 
-static void mpeg1_frame_unref(video_t *v, const video_frame_t *frame) {
-	mpeg1_t *mp1 = (mpeg1_t *)v;
-	plm_video_unref_picture(mp1->v, frame->picture_id);
+static void mpeg1_picture_pool_free(video_picture_pool_t *pool) {
+	if (RSP_MODE >= 2)
+		free_uncached(pool->data);
+	else
+		free(pool->data);
+	free(pool);
 }
 
 static int mpeg1_frames_waiting(video_t *v) {
@@ -427,9 +483,14 @@ static int mpeg1_frames_waiting(video_t *v) {
 
 static void mpeg1_close(video_t *v) {
 	mpeg1_t *mp1 = (mpeg1_t *)v;
-	// Every frame taken must have been released by now (plm_video_deinit
-	// asserts that no picture is still referenced).
+	// The decoder lets go of the pictures it holds (its queue's). Its own
+	// pool goes with it, so every frame taken must have been dropped by now
+	// (video_picture_pool_free asserts it); a lent pool keeps the frames
+	// still referenced, and can take the next video at once.
 	plm_video_deinit(mp1->v);
+	mp1->pool->lent = false;
+	if (mp1->own_pool)
+		video_picture_pool_free(mp1->pool);
 	plm_buffer_deinit(mp1->buf);
 	free(mp1->decoder);
 	if (mp1->has_reader && mp1->reader.close)
@@ -464,7 +525,7 @@ video_codec_t mpeg1_codec = {
 	.rewind = mpeg1_rewind,
 	.open_reader = mpeg1_open_reader,
 	.set_loop = mpeg1_set_loop,
-	.frame_ref = mpeg1_frame_ref,
-	.frame_unref = mpeg1_frame_unref,
+	.picture_pool_alloc = mpeg1_picture_pool_alloc,
+	.picture_pool_free = mpeg1_picture_pool_free,
 	.frames_waiting = mpeg1_frames_waiting,
 };

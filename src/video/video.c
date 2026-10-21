@@ -154,6 +154,27 @@ video_t* video_open_reader(video_codec_t *codec, const video_reader_t *reader,
     return v;
 }
 
+video_picture_pool_t *video_picture_pool_alloc(video_codec_t *codec, int width, int height,
+    int buffered_pics)
+{
+    assertf(codec->picture_pool_alloc, "Codec %s can't decode into a picture pool", codec->extension);
+    video_picture_pool_t *pool = codec->picture_pool_alloc(width, height, buffered_pics);
+    pool->codec = codec;
+    return pool;
+}
+
+void video_picture_pool_free(video_picture_pool_t *pool)
+{
+    assertf(!pool->lent, "video_picture_pool_free: a video is still decoding into it; close it first");
+    int referenced = 0;
+    for (int i = 0; i < pool->count; i++) {
+        referenced += pool->refs[i] != 0;
+    }
+    assertf(referenced == 0,
+        "video_picture_pool_free: %d picture(s) still referenced; drop them first", referenced);
+    pool->codec->picture_pool_free(pool);
+}
+
 void video_close(video_t *v)
 {
     if (v->seektable) {
@@ -185,12 +206,9 @@ video_status_t video_take_frame(video_t *v, video_frame_t *frame)
     assertf(frame, "video_take_frame: no frame to fill in");
     video_status_t status;
     if (v->codec->take_frame) {
-        // The codec counts references: the frame comes with one, the caller's.
-        status = v->codec->take_frame(v, frame);
-        if (status == VIDEO_FRAME) {
-            frame->video = v;
-        }
-        return status;
+        // The codec counts references: the frame comes with one, the
+        // caller's, and names the pictures it's one of (video_frame_t::pool).
+        return v->codec->take_frame(v, frame);
     }
     // A codec that can't count references keeps the last frame itself, until
     // the next take (see video.h).
@@ -205,30 +223,40 @@ video_status_t video_take_frame(video_t *v, video_frame_t *frame)
     }
 
     // The codec owns the frame, index included: only it knows which picture
-    // this is (it may have decoded ahead, rewound or looped since).
+    // this is (it may have decoded ahead, rewound or looped since). It has no
+    // pool: nothing to reference.
     *frame = v->codec->get_frame(v);
-    frame->video = v;
+    frame->pool = NULL;
     return VIDEO_FRAME;
 }
 
+// The references are the pool's, so a frame needs no video to be referenced
+// or dropped: its picture outlives the video that decoded it, while the
+// pool lives.
 void video_frame_ref(const video_frame_t *frame)
 {
-    video_t *v = frame->video;
-    assertf(v, "video_frame_ref: not a frame from video_take_frame");
-    assertf(v->codec->frame_ref, "Codec %s can't reference frames", v->codec->extension);
-    v->codec->frame_ref(v, frame);
+    video_picture_pool_t *pool = frame->pool;
+    assertf(pool, "video_frame_ref: a frame whose codec can't count references, "
+        "or not from video_take_frame");
+    assertf(frame->picture_id >= 0 && frame->picture_id < pool->count,
+        "video_frame_ref: not one of its pool's pictures");
+    assertf(pool->refs[frame->picture_id] < 255, "video_frame_ref: too many references to one picture");
+    pool->refs[frame->picture_id]++;
 }
 
 void video_frame_unref(const video_frame_t *frame)
 {
-    video_t *v = frame->video;
-    assertf(v, "video_frame_unref: not a frame from video_take_frame");
+    video_picture_pool_t *pool = frame->pool;
     // A codec that can't count references keeps the last frame taken itself
     // (see video_take_frame): there's nothing to drop.
-    if (!v->codec->frame_unref) {
+    if (!pool) {
         return;
     }
-    v->codec->frame_unref(v, frame);
+    assertf(frame->picture_id >= 0 && frame->picture_id < pool->count,
+        "video_frame_unref: not one of its pool's pictures");
+    assertf(pool->refs[frame->picture_id] > 0,
+        "video_frame_unref: dropping a reference to a picture nobody references");
+    pool->refs[frame->picture_id]--;
 }
 
 void video_set_loop(video_t *v, bool loop)

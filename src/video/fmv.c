@@ -119,6 +119,7 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
 
     int frame_idx = 0;
     video_frame_t frame = {0};      // the frame on screen (kept while paused)
+    bool has_frame = false;         // frame holds one (from the first take on)
     bool paused = false;
     bool abort = false;
     video_sync_t *vsync = NULL;
@@ -221,8 +222,9 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
                     break;
                 }
             }
-            if (frame.video) video_frame_unref(&frame);
+            if (has_frame) video_frame_unref(&frame);
             frame = next;
+            has_frame = true;
 
             if (subs) subtitles_next_frame(subs);
         }
@@ -266,7 +268,7 @@ void fmv_play(const char *video_fn, const fmv_parms_t *parms)
 
     rspq_wait();
     // The RDP is idle: the frame on screen can go back to its decoder.
-    if (frame.video) video_frame_unref(&frame);
+    if (has_frame) video_frame_unref(&frame);
 
     if (subrenderer) subrenderer_free(subrenderer);
     if (audio) {

@@ -76,6 +76,7 @@ extern "C" {
 ///@cond
 struct video_s;
 struct video_codec_s;
+struct video_picture_pool_s;
 ///@endcond
 
 /** @brief A video codec */
@@ -83,6 +84,9 @@ typedef struct video_codec_s video_codec_t;
 
 /** @brief A video handle */
 typedef struct video_s video_t;
+
+/** @brief Pictures that videos decode into (see #video_picture_pool_alloc) */
+typedef struct video_picture_pool_s video_picture_pool_t;
 
 /** @brief Video playback parameters*/
 typedef struct video_parms_s {
@@ -96,6 +100,9 @@ typedef struct video_parms_s {
      * YUV 4:2:0 (16 bpp).
      *
      * If 0 (default), #video_poll is effectively disabled and cannot decode ahead.
+     *
+     * With a picture pool (#picture_pool), it's the pool's: leave this 0, or
+     * give the same number.
      */
     int buffered_pics;
 
@@ -108,6 +115,18 @@ typedef struct video_parms_s {
      * can't fit. If 0 (default), 32 KiB.
      */
     int reader_buffer_size;
+
+    /**
+     * @brief Optional: the pictures to decode into (see #video_picture_pool_alloc)
+     *
+     * If set, the video decodes into these instead of allocating pictures of
+     * its own, and its frames stay valid after #video_close, until their last
+     * reference is dropped. The pool must be made for the video's codec, and
+     * its pictures must fit the video's (both assert at open). One video at a
+     * time decodes into a pool. If NULL (default), the video allocates its
+     * own when it opens, and frees them at #video_close.
+     */
+    video_picture_pool_t *picture_pool;
 } video_parms_t;
 
 /**
@@ -257,6 +276,48 @@ video_t* video_open_reader(video_codec_t *codec, const video_reader_t *reader,
     const video_parms_t *parms);
 
 /**
+ * @brief Make pictures for videos to decode into, one after another
+ * @preview
+ *
+ * The memory decoded pictures live in, made once and lent to each video
+ * opened with it (video_parms_t::picture_pool), so that a program switching
+ * between videos doesn't allocate and free a decoder's pictures every time.
+ *
+ * Each picture counts its references (see #video_frame_ref), and a frame
+ * names its pool, not its video (video_frame_t::pool). So a video can be
+ * closed while someone (the RDP, still drawing) holds one of its frames, and
+ * the next video opened on the pool at once: the held picture is simply
+ * busy, the new video decodes into the free ones, and the busy one becomes
+ * free when its last reference is dropped.
+ *
+ * The pictures are laid out the way @p codec needs them, for videos up to
+ * @p width x @p height pixels that decode up to @p buffered_pics ahead (as
+ * video_parms_t::buffered_pics); the codec adds the pictures it decodes
+ * with. Not every codec supports it; this asserts if it can't.
+ *
+ * @param codec         The codec that will decode into them (for example, &mpeg1_codec)
+ * @param width         The widest video they're for, in pixels
+ * @param height        The tallest video they're for, in pixels
+ * @param buffered_pics How many pictures ahead a video may decode
+ * @return              The pool
+ */
+LIBDRAGON_PREVIEW_API
+video_picture_pool_t *video_picture_pool_alloc(video_codec_t *codec, int width, int height,
+    int buffered_pics);
+
+/**
+ * @brief Free a picture pool
+ * @preview
+ *
+ * The video decoding into it must be closed, and every reference to its
+ * pictures dropped (it asserts).
+ *
+ * @param pool          The pool
+ */
+LIBDRAGON_PREVIEW_API
+void video_picture_pool_free(video_picture_pool_t *pool);
+
+/**
  * @brief Get information about the video
  * @preview
  * 
@@ -284,20 +345,20 @@ typedef struct video_frame_s {
      */
     int index;
     /**
-     * @brief Which of the decoder's pictures this is (opaque)
+     * @brief The pictures the frame's picture is one of (opaque)
      *
-     * Set by the codec when it hands the frame out, for #video_frame_ref and
-     * #video_frame_unref to find the picture by; don't change it.
+     * Set by the codec when it hands the frame out (#video_take_frame), so
+     * that #video_frame_ref and #video_frame_unref need only the frame, even
+     * after its video has closed; don't change it. NULL for a codec that
+     * can't count references.
+     */
+    video_picture_pool_t *pool;
+    /**
+     * @brief Which of its pool's pictures this is (opaque)
+     *
+     * Set by the codec when it hands the frame out; don't change it.
      */
     int picture_id;
-    /**
-     * @brief The video the frame came from (opaque)
-     *
-     * Set when the frame is handed out (#video_take_frame), so that
-     * #video_frame_ref and #video_frame_unref need only the frame; don't
-     * change it.
-     */
-    video_t *video;
 } video_frame_t;
 
 /**
@@ -314,7 +375,10 @@ typedef struct video_frame_s {
  * its picture stays valid, its memory not reused by the decoder, until you
  * drop that reference with #video_frame_unref. You can hold several frames
  * at once (the one on screen and the next, say), and keep one across a
- * #video_rewind. Every reference must be dropped before #video_close.
+ * #video_rewind. For a video with its own pictures, every reference must be
+ * dropped before #video_close; one decoding into a pool
+ * (video_parms_t::picture_pool) leaves its frames valid after it closes,
+ * until their last reference is dropped.
  *
  * A codec that can't count references (only MPEG-1 can today) keeps the last
  * frame taken itself: it stays valid only until the next #video_take_frame,
@@ -344,10 +408,12 @@ video_status_t video_take_frame(video_t *v, video_frame_t *frame);
  * RDP runs later, so add a reference when queueing them and drop it when the
  * RDP has finished (the #rdpq_detach_cb callback), not before. Rewinding
  * doesn't free a referenced picture either: it stays intact until its last
- * reference is dropped. Every reference must be dropped before
- * #video_close (it asserts): a referenced frame must not outlive its video.
+ * reference is dropped. For a video with its own pictures, every reference
+ * must be dropped before #video_close (it asserts): the pictures go with the
+ * video. Pictures in a pool (video_parms_t::picture_pool) outlive the video:
+ * their references must be dropped before #video_picture_pool_free.
  *
- * The frame knows which video it came from (video_frame_t::video), so this
+ * The frame knows which pictures it's one of (video_frame_t::pool), so this
  * takes only the frame. Not every codec supports it; this asserts if it
  * can't.
  *
@@ -497,6 +563,11 @@ bool video_is_seekable(video_t *v, int frame_idx);
  *
  * For a video opened with #video_open_reader, this calls
  * video_reader_t::close (if set).
+ *
+ * A video with its own pictures frees them, so every frame taken from it
+ * must have been dropped (it asserts). A video decoding into a pool
+ * (video_parms_t::picture_pool) frees none: frames still referenced stay
+ * valid, and the pool can take the next video at once.
  *
  * @param v             Handle to the video
  */
