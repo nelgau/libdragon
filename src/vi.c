@@ -87,7 +87,7 @@ typedef struct {
     void *arg;                         ///< Argument to pass to the callback
 } line_irqs_t;
 
-#define MAX_VBLANK_HANDLERS   4                             ///< Maximum number of vblank handlers
+#define MAX_VBLANK_HANDLERS   8                             ///< Maximum number of vblank handlers
 #define MAX_LINE_IRQS  16                                   ///< Maximum number of line interrupts
 static line_irqs_t line_irqs[MAX_LINE_IRQS] = {0};          ///< Line interrupt callbacks
 static line_irqs_t new_line_irqs[MAX_LINE_IRQS] = {0};      ///< New line interrupt callbacks
